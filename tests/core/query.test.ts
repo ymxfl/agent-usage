@@ -59,13 +59,54 @@ describe('UsageRepository.report', () => {
         topSkills: [],
         mcp: [],
         warnings: [
-          'JoyCode MCP usage is unavailable because JoyCode supports stdio MCP servers only.',
+          'JoyCode MCP coverage is stdio-only',
         ],
       });
       expect(fixture.repository.report({ agent: 'codex' }, 'all time').warnings).toEqual([]);
       expect(fixture.repository.report({ agent: 'joycode' }, 'all time').warnings).toEqual([
-        'JoyCode MCP usage is unavailable because JoyCode supports stdio MCP servers only.',
+        'JoyCode MCP coverage is stdio-only',
       ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it.each([
+    ['today', 1],
+    ['7d', 2],
+    ['30d', 3],
+    ['all', 4],
+  ] satisfies Array<[NamedRange, number]>)('applies the %s range to stored events', async (range, expectedCount) => {
+    const fixture = await repositoryFixture();
+    const now = new Date(2026, 5, 18, 15, 45, 30, 125);
+    const timestamps = [
+      new Date(2026, 5, 18, 12, 0, 0, 0),
+      new Date(2026, 5, 11, 16, 0, 0, 0),
+      new Date(2026, 4, 20, 12, 0, 0, 0),
+      new Date(2026, 4, 1, 12, 0, 0, 0),
+    ];
+
+    try {
+      for (const occurredAt of timestamps) {
+        fixture.repository.insert(usageEvent({
+          occurredAt: occurredAt.toISOString(),
+        }));
+      }
+
+      const since = namedRangeStart(range, now);
+      const report = fixture.repository.report(
+        since === undefined ? {} : { since },
+        range,
+      );
+
+      expect(report.rangeLabel).toBe(range);
+      expect(report.totals).toEqual([
+        expect.objectContaining({ count: expectedCount }),
+      ]);
+      expect(report.topSkills).toEqual([
+        expect.objectContaining({ count: expectedCount }),
+      ]);
+      expect(report.mcp).toEqual([]);
     } finally {
       fixture.close();
     }
@@ -109,6 +150,7 @@ describe('UsageRepository.report', () => {
           agent: 'codex',
           kind: 'skill_invocation',
           evidence: 'native_hook',
+          precision: 'exact',
           count: 1,
         },
       ]);
@@ -131,6 +173,89 @@ describe('UsageRepository.report', () => {
 
       expect(report.totals).toEqual([
         expect.objectContaining({ agent: "codex' OR 1=1 --", count: 1 }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('applies an agent filter consistently to totals, skills, and MCP calls', async () => {
+    const fixture = await repositoryFixture();
+
+    try {
+      for (const agent of ['codex', 'claude']) {
+        fixture.repository.insert(usageEvent({
+          agent,
+          kind: 'skill_invocation',
+          name: `${agent}-skill`,
+        }));
+        fixture.repository.insert(usageEvent({
+          agent,
+          kind: 'mcp_call',
+          name: `${agent}-tool`,
+          mcpServer: `${agent}-server`,
+          skillId: undefined,
+          evidence: 'mcp_proxy',
+        }));
+      }
+
+      const report = fixture.repository.report({ agent: 'codex' }, 'all time');
+
+      expect(report.totals.map(({ agent }) => agent)).toEqual(['codex', 'codex']);
+      expect(report.topSkills).toEqual([
+        expect.objectContaining({ agent: 'codex', name: 'codex-skill' }),
+      ]);
+      expect(report.mcp).toEqual([
+        expect.objectContaining({
+          agent: 'codex',
+          server: 'codex-server',
+          tool: 'codex-tool',
+        }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('applies kind filters consistently and intentionally suppresses other categories', async () => {
+    const fixture = await repositoryFixture();
+
+    try {
+      fixture.repository.insert(usageEvent({
+        kind: 'skill_invocation',
+        name: 'invoked-skill',
+      }));
+      fixture.repository.insert(usageEvent({
+        kind: 'skill_session_load',
+        name: 'loaded-skill',
+      }));
+      fixture.repository.insert(usageEvent({
+        kind: 'mcp_call',
+        name: 'issues/list',
+        mcpServer: 'github',
+        skillId: undefined,
+        evidence: 'mcp_proxy',
+      }));
+
+      const skills = fixture.repository.report(
+        { kind: 'skill_invocation' },
+        'all time',
+      );
+      expect(skills.totals).toEqual([
+        expect.objectContaining({ kind: 'skill_invocation', count: 1 }),
+      ]);
+      expect(skills.topSkills).toEqual([
+        expect.objectContaining({ name: 'invoked-skill', count: 1 }),
+      ]);
+      expect(skills.mcp).toEqual([]);
+
+      const mcp = fixture.repository.report({ kind: 'mcp_call' }, 'all time');
+      expect(mcp.totals).toEqual([
+        expect.objectContaining({ kind: 'mcp_call', count: 1 }),
+      ]);
+      expect(mcp.topSkills).toEqual([]);
+      expect(mcp.mcp).toEqual([
+        expect.objectContaining({ server: 'github', tool: 'issues/list' }),
       ]);
     } finally {
       fixture.close();

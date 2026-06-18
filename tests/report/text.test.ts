@@ -12,12 +12,14 @@ describe('renderUsageReportText', () => {
           agent: 'codex',
           kind: 'skill_invocation',
           evidence: 'native_hook',
+          precision: 'exact',
           count: 3,
         },
         {
           agent: 'joycode',
           kind: 'mcp_call',
           evidence: 'mcp_proxy',
+          precision: 'best_effort',
           count: 1,
         },
       ],
@@ -46,26 +48,26 @@ describe('renderUsageReportText', () => {
       ],
       warnings: [
         'Injected MCP skill usage is best-effort and may be incomplete.',
-        'JoyCode MCP usage is unavailable because JoyCode supports stdio MCP servers only.',
+        'JoyCode MCP coverage is stdio-only',
       ],
     };
 
     expect(renderUsageReportText(report)).toBe(`Usage statistics — last 7 days
 
 Totals
-- codex · skill_invocation · native_hook: 3
-- joycode · mcp_call · mcp_proxy: 1
+- codex · skill_invocation · [native_hook, exact]: 3
+- joycode · mcp_call · [mcp_proxy, best_effort]: 1
 
 Skills
 - codex · test-driven-development: 3
 
 MCP
-- codex · github · issues/list: success 2, failure 1, unknown 1; avg 13 ms
-- codex · web · search: success 0, failure 0, unknown 1; avg n/a
+- codex · github.issues/list: 4 attempts (success 2, failure 1, unknown 1); avg 13 ms
+- codex · web.search: 1 attempt (success 0, failure 0, unknown 1); avg n/a
 
 Coverage warnings
 - Injected MCP skill usage is best-effort and may be incomplete.
-- JoyCode MCP usage is unavailable because JoyCode supports stdio MCP servers only.
+- JoyCode MCP coverage is stdio-only
 `);
   });
 

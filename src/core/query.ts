@@ -14,6 +14,7 @@ export interface UsageTotal {
   agent: string;
   kind: UsageEvent['kind'];
   evidence: UsageEvent['evidence'];
+  precision: UsageEvent['precision'];
   count: number;
 }
 
@@ -48,8 +49,7 @@ interface SqlFilter {
 
 const INJECTED_MCP_WARNING =
   'Injected MCP skill usage is best-effort and may be incomplete.';
-const JOYCODE_MCP_WARNING =
-  'JoyCode MCP usage is unavailable because JoyCode supports stdio MCP servers only.';
+const JOYCODE_MCP_WARNING = 'JoyCode MCP coverage is stdio-only';
 
 function sqlFilter(filter: QueryFilter): SqlFilter {
   const predicates: string[] = [];
@@ -110,17 +110,18 @@ export function queryUsageReport(
 
   const totals = database
     .prepare(`
-      SELECT agent, kind, evidence, COUNT(*) AS count
+      SELECT agent, kind, evidence, precision, COUNT(*) AS count
       FROM usage_events
       ${sql.clause}
-      GROUP BY agent, kind, evidence
-      ORDER BY agent, kind, evidence
+      GROUP BY agent, kind, evidence, precision
+      ORDER BY agent, kind, evidence, precision
     `)
     .all(...sql.parameters)
     .map((row) => ({
       agent: row.agent as string,
       kind: row.kind as UsageEvent['kind'],
       evidence: row.evidence as UsageEvent['evidence'],
+      precision: row.precision as UsageEvent['precision'],
       count: numeric(row.count as number | bigint),
     }));
 

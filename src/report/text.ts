@@ -12,7 +12,7 @@ export function renderUsageReportText(report: UsageReport): string {
       'Totals',
       report.totals.map(
         (total) =>
-          `- ${total.agent} · ${total.kind} · ${total.evidence}: ${total.count}`,
+          `- ${total.agent} · ${total.kind} · [${total.evidence}, ${total.precision}]: ${total.count}`,
       ),
     ),
     '',
@@ -26,11 +26,12 @@ export function renderUsageReportText(report: UsageReport): string {
     ...section(
       'MCP',
       report.mcp.map((entry) => {
+        const attempts = entry.success + entry.failure + entry.unknown;
         const average =
           entry.averageDurationMs === null
             ? 'n/a'
             : `${Math.round(entry.averageDurationMs)} ms`;
-        return `- ${entry.agent} · ${entry.server} · ${entry.tool}: success ${entry.success}, failure ${entry.failure}, unknown ${entry.unknown}; avg ${average}`;
+        return `- ${entry.agent} · ${entry.server}.${entry.tool}: ${attempts} ${attempts === 1 ? 'attempt' : 'attempts'} (success ${entry.success}, failure ${entry.failure}, unknown ${entry.unknown}); avg ${average}`;
       }),
     ),
   ];
