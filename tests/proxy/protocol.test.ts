@@ -113,6 +113,51 @@ describe('McpProtocolObserver', () => {
     ]);
   });
 
+  it('retains only bounded metadata while streaming a 32 MiB argument string', () => {
+    const { observer, events } = fixture();
+    observer.observeClientChunk(
+      '{"jsonrpc":"2.0","id":99,"method":"tools/call","params":' +
+      '{"name":"huge","arguments":{"secret":"',
+    );
+    const argumentChunk = Buffer.alloc(64 * 1024, 0x78);
+    for (let index = 0; index < 512; index += 1) {
+      observer.observeClientChunk(argumentChunk);
+    }
+    const retainedWhileUnterminated = (
+      observer as unknown as { bufferedMetadataBytes: number }
+    ).bufferedMetadataBytes;
+
+    observer.observeClientChunk('"}}}\n');
+    observer.endClientStream();
+    observer.observeServerChunk('{"jsonrpc":"2.0","id":99,"result":{}}\n');
+    observer.endServerStream();
+
+    expect(retainedWhileUnterminated).toBeLessThanOrEqual(16 * 1024);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ name: 'huge', outcome: 'success' });
+  });
+
+  it('fails open when tool-name or string-id metadata exceeds its bound', () => {
+    const { observer, events } = fixture();
+    const oversizedName = 'n'.repeat(4097);
+    const oversizedId = 'i'.repeat(1025);
+
+    observer.observeClientChunk(
+      `{"id":1,"method":"tools/call","params":{"name":${JSON.stringify(oversizedName)}}}\n`,
+    );
+    observer.observeClientChunk(
+      `{"id":${JSON.stringify(oversizedId)},"method":"tools/call","params":{"name":"tool"}}\n`,
+    );
+    observer.endClientStream();
+    observer.observeServerChunk('{"id":1,"result":{}}\n');
+    observer.observeServerChunk(
+      `{"id":${JSON.stringify(oversizedId)},"result":{}}\n`,
+    );
+    observer.endServerStream();
+
+    expect(events).toEqual([]);
+  });
+
   it('ignores malformed, notification, non-tool, unmatched, and invalid-name messages', () => {
     const { observer, events } = fixture();
 

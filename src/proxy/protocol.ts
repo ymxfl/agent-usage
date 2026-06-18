@@ -1,11 +1,9 @@
 import { performance } from 'node:perf_hooks';
+import { StringDecoder } from 'node:string_decoder';
 
-import {
-  JSONParser,
-  TokenType,
-  type ParsedElementInfo,
-  type ParsedTokenInfo,
-} from '@streamparser/json';
+import * as StreamJsonParserModule from 'stream-json/core/parser.js';
+import type { Token } from 'stream-json/core/parser.js';
+import { getManyValues, isMany, none } from 'stream-chain/defs.js';
 
 import type { UsageEvent } from '../core/event.js';
 import { proxyDedupeKey } from '../core/identity.js';
@@ -33,39 +31,65 @@ interface ObservedJsonRpcMessage {
   isError: boolean;
 }
 
-type JsonPathPart = string | number;
+const UNKNOWN_PATH = Symbol('unknown-json-path');
+type JsonPathPart = string | number | typeof UNKNOWN_PATH;
 
 interface ObjectFrame {
   kind: 'object';
   path: JsonPathPart[];
-  state: 'key' | 'colon' | 'value' | 'comma';
-  key?: string | undefined;
+  key: string | typeof UNKNOWN_PATH | undefined;
 }
 
 interface ArrayFrame {
   kind: 'array';
   path: JsonPathPart[];
-  state: 'value' | 'comma';
   index: number;
 }
 
 type StructuralFrame = ObjectFrame | ArrayFrame;
-
 type JsonObject = Record<string, unknown>;
+type MetadataField = 'id' | 'method' | 'name';
+
+interface MetadataTarget {
+  messageKey: string;
+  field: MetadataField;
+  limit: number;
+}
+
+interface TokenCollector {
+  kind: 'key' | 'string' | 'number';
+  target?: MetadataTarget | undefined;
+  value: string;
+  bytes: number;
+  limit: number;
+  overflow: boolean;
+}
+
+type RawJsonParser = (value: string | typeof none) => unknown;
 
 const SELF_SERVERS = new Set(['usage-stats', 'agent-usage']);
-const STREAM_PATHS = [
-  '$.id',
-  '$.method',
-  '$.params.name',
-  '$.result.isError',
-  '$.error.code',
-  '$.*.id',
-  '$.*.method',
-  '$.*.params.name',
-  '$.*.result.isError',
-  '$.*.error.code',
-];
+
+// Metadata is retained only up to these explicit UTF-8 byte limits. All other
+// string/number token chunks (arguments and results included) are discarded.
+const MAX_JSON_KEY_BYTES = 64;
+const MAX_MCP_METHOD_BYTES = 64;
+const MAX_MCP_TOOL_NAME_BYTES = 4096;
+const MAX_JSON_RPC_STRING_ID_BYTES = 1024;
+const MAX_JSON_RPC_NUMBER_ID_BYTES = 128;
+const PARSER_INPUT_CHUNK_BYTES = 16 * 1024;
+
+const createRawJsonParser = (
+  StreamJsonParserModule as unknown as {
+    jsonParser(options: {
+      packKeys: boolean;
+      packStrings: boolean;
+      packNumbers: boolean;
+      streamKeys: boolean;
+      streamStrings: boolean;
+      streamNumbers: boolean;
+    }): RawJsonParser;
+  }
+).jsonParser;
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -73,6 +97,19 @@ function isObject(value: unknown): value is JsonObject {
 
 function requestKey(id: string | number): string {
   return `${typeof id}:${JSON.stringify(id)}`;
+}
+
+function isValidId(value: unknown): value is string | number {
+  if (typeof value === 'string') {
+    return Buffer.byteLength(value) <= MAX_JSON_RPC_STRING_ID_BYTES;
+  }
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isValidToolName(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    Buffer.byteLength(value) <= MAX_MCP_TOOL_NAME_BYTES;
 }
 
 function parseLine(line: string | Uint8Array): unknown | undefined {
@@ -95,11 +132,12 @@ function observedMessages(value: unknown): ObservedJsonRpcMessage[] {
     const params = isObject(message.params) ? message.params : undefined;
     const result = isObject(message.result) ? message.result : undefined;
     return [{
-      ...(typeof message.id === 'string' || typeof message.id === 'number'
-        ? { id: message.id }
+      ...(isValidId(message.id) ? { id: message.id } : {}),
+      ...(typeof message.method === 'string' &&
+        Buffer.byteLength(message.method) <= MAX_MCP_METHOD_BYTES
+        ? { method: message.method }
         : {}),
-      ...(typeof message.method === 'string' ? { method: message.method } : {}),
-      ...(typeof params?.name === 'string' ? { name: params.name } : {}),
+      ...(isValidToolName(params?.name) ? { name: params.name } : {}),
       hasResult: Object.hasOwn(message, 'result'),
       hasError: Object.hasOwn(message, 'error'),
       isError: result?.isError === true,
@@ -120,68 +158,174 @@ function messagePath(
   return undefined;
 }
 
-class JsonStructureTracker {
+function tokensFrom(result: unknown): Token[] {
+  if (result === none) return [];
+  if (isMany(result)) return getManyValues(result) as Token[];
+  return [result as Token];
+}
+
+class JsonRpcTokenExtractor {
   readonly #frames: StructuralFrame[] = [];
-  readonly #messages: Map<string, ObservedJsonRpcMessage>;
+  readonly #messages = new Map<string, ObservedJsonRpcMessage>();
+  #collector: TokenCollector | undefined;
   #rootStarted = false;
 
-  constructor(messages: Map<string, ObservedJsonRpcMessage>) {
-    this.#messages = messages;
+  accept(token: Token): void {
+    switch (token.name) {
+      case 'startKey':
+        this.#collector = this.#newCollector('key', MAX_JSON_KEY_BYTES);
+        break;
+      case 'stringChunk':
+      case 'numberChunk':
+        this.#append(token.value);
+        break;
+      case 'endKey':
+        this.#finishKey();
+        break;
+      case 'startString':
+        this.#startScalar('string');
+        break;
+      case 'endString':
+        this.#finishScalar();
+        break;
+      case 'startNumber':
+        this.#startScalar('number');
+        break;
+      case 'endNumber':
+        this.#finishScalar();
+        break;
+      case 'startObject':
+        this.#startContainer('object');
+        break;
+      case 'endObject':
+        this.#frames.pop();
+        break;
+      case 'startArray':
+        this.#startContainer('array');
+        break;
+      case 'endArray':
+        this.#frames.pop();
+        break;
+      case 'trueValue':
+      case 'falseValue':
+        this.#captureLiteral(token.value);
+        break;
+      case 'nullValue':
+        this.#captureLiteral(null);
+        break;
+      case 'keyValue':
+      case 'stringValue':
+      case 'numberValue':
+      case 'whitespace':
+        // Packing is disabled. These cases are retained for exhaustive typing.
+        break;
+    }
   }
 
-  accept({ token, value, partial }: ParsedTokenInfo.ParsedTokenInfo): void {
-    if (partial) return;
+  get messages(): ObservedJsonRpcMessage[] {
+    return [...this.#messages.values()];
+  }
+
+  get bufferedMetadataBytes(): number {
+    let total = this.#collector?.bytes ?? 0;
+    for (const message of this.#messages.values()) {
+      if (typeof message.id === 'string') total += Buffer.byteLength(message.id);
+      if (message.method !== undefined) total += Buffer.byteLength(message.method);
+      if (message.name !== undefined) total += Buffer.byteLength(message.name);
+    }
+    return total;
+  }
+
+  #newCollector(
+    kind: TokenCollector['kind'],
+    limit: number,
+    target?: MetadataTarget,
+  ): TokenCollector {
+    return { kind, target, value: '', bytes: 0, limit, overflow: false };
+  }
+
+  #append(value: string): void {
+    const collector = this.#collector;
+    if (collector === undefined || collector.overflow) return;
+    const bytes = Buffer.byteLength(value);
+    if (collector.bytes + bytes > collector.limit) {
+      collector.value = '';
+      collector.bytes = 0;
+      collector.overflow = true;
+      return;
+    }
+    collector.value += value;
+    collector.bytes += bytes;
+  }
+
+  #finishKey(): void {
+    const collector = this.#collector;
+    this.#collector = undefined;
     const frame = this.#frames.at(-1);
-    if (token === TokenType.SEPARATOR) return;
+    if (frame?.kind !== 'object' || collector?.kind !== 'key') return;
+    frame.key = collector.overflow ? UNKNOWN_PATH : collector.value;
+  }
 
-    if (frame?.kind === 'object' && frame.state === 'key') {
-      if (token === TokenType.STRING) {
-        frame.key = value as string;
-        frame.state = 'colon';
-        return;
-      }
-      if (token === TokenType.RIGHT_BRACE) {
-        this.#frames.pop();
-        return;
-      }
-    }
-
-    if (frame?.kind === 'object' && frame.state === 'colon') {
-      if (token === TokenType.COLON) frame.state = 'value';
-      return;
-    }
-
-    if (
-      frame?.kind === 'array' &&
-      frame.state === 'value' &&
-      token === TokenType.RIGHT_BRACKET
-    ) {
-      this.#frames.pop();
-      return;
-    }
-
-    if (frame?.state === 'comma') {
-      if (token === TokenType.COMMA) {
-        frame.state = frame.kind === 'object' ? 'key' : 'value';
-        return;
-      }
-      if (
-        (frame.kind === 'object' && token === TokenType.RIGHT_BRACE) ||
-        (frame.kind === 'array' && token === TokenType.RIGHT_BRACKET)
-      ) {
-        this.#frames.pop();
-        return;
-      }
-    }
-
+  #startScalar(kind: 'string' | 'number'): void {
     const path = this.#consumeValuePath();
     if (path === undefined) return;
     this.#markResponsePresence(path);
+    const target = this.#metadataTarget(path, kind);
+    const limit = target?.limit ?? 0;
+    this.#collector = this.#newCollector(kind, limit, target);
+    if (target === undefined) this.#collector.overflow = true;
+  }
 
-    if (token === TokenType.LEFT_BRACE) {
-      this.#frames.push({ kind: 'object', path, state: 'key' });
-    } else if (token === TokenType.LEFT_BRACKET) {
-      this.#frames.push({ kind: 'array', path, state: 'value', index: 0 });
+  #finishScalar(): void {
+    const collector = this.#collector;
+    this.#collector = undefined;
+    if (
+      collector === undefined ||
+      collector.kind === 'key' ||
+      collector.target === undefined ||
+      collector.overflow
+    ) {
+      return;
+    }
+
+    const message = this.#message(collector.target.messageKey);
+    if (collector.target.field === 'id') {
+      if (collector.kind === 'string') {
+        message.id = collector.value;
+      } else {
+        const id = Number(collector.value);
+        if (Number.isFinite(id)) message.id = id;
+      }
+    } else if (collector.target.field === 'method') {
+      message.method = collector.value;
+    } else if (collector.value.length > 0) {
+      message.name = collector.value;
+    }
+  }
+
+  #startContainer(kind: StructuralFrame['kind']): void {
+    const path = this.#consumeValuePath();
+    if (path === undefined) return;
+    this.#markResponsePresence(path);
+    if (kind === 'object') {
+      this.#frames.push({ kind, path, key: undefined });
+    } else {
+      this.#frames.push({ kind, path, index: 0 });
+    }
+  }
+
+  #captureLiteral(value: boolean | null): void {
+    const path = this.#consumeValuePath();
+    if (path === undefined) return;
+    this.#markResponsePresence(path);
+    const location = messagePath(path);
+    if (
+      value === true &&
+      location?.relative.length === 2 &&
+      location.relative[0] === 'result' &&
+      location.relative[1] === 'isError'
+    ) {
+      this.#message(location.key).isError = true;
     }
   }
 
@@ -192,30 +336,57 @@ class JsonStructureTracker {
       this.#rootStarted = true;
       return [];
     }
-    if (frame.state !== 'value') return undefined;
-
-    frame.state = 'comma';
-    if (frame.kind === 'object') {
-      if (frame.key === undefined) return undefined;
-      const path = [...frame.path, frame.key];
-      frame.key = undefined;
+    if (frame.kind === 'array') {
+      const path = [...frame.path, frame.index];
+      frame.index += 1;
       return path;
     }
 
-    const path = [...frame.path, frame.index];
-    frame.index += 1;
-    return path;
+    const key = frame.key ?? UNKNOWN_PATH;
+    frame.key = undefined;
+    return [...frame.path, key];
+  }
+
+  #metadataTarget(
+    path: JsonPathPart[],
+    kind: 'string' | 'number',
+  ): MetadataTarget | undefined {
+    const location = messagePath(path);
+    if (location === undefined) return undefined;
+    const relative = location.relative.join('.');
+    if (relative === 'id') {
+      return {
+        messageKey: location.key,
+        field: 'id',
+        limit: kind === 'string'
+          ? MAX_JSON_RPC_STRING_ID_BYTES
+          : MAX_JSON_RPC_NUMBER_ID_BYTES,
+      };
+    }
+    if (kind !== 'string') return undefined;
+    if (relative === 'method') {
+      return {
+        messageKey: location.key,
+        field: 'method',
+        limit: MAX_MCP_METHOD_BYTES,
+      };
+    }
+    if (relative === 'params.name') {
+      return {
+        messageKey: location.key,
+        field: 'name',
+        limit: MAX_MCP_TOOL_NAME_BYTES,
+      };
+    }
+    return undefined;
   }
 
   #markResponsePresence(path: JsonPathPart[]): void {
     const location = messagePath(path);
     if (location === undefined || location.relative.length !== 1) return;
     const [property] = location.relative;
-    if (property !== 'result' && property !== 'error') return;
-
-    const message = this.#message(location.key);
-    if (property === 'result') message.hasResult = true;
-    else message.hasError = true;
+    if (property === 'result') this.#message(location.key).hasResult = true;
+    else if (property === 'error') this.#message(location.key).hasError = true;
   }
 
   #message(key: string): ObservedJsonRpcMessage {
@@ -229,74 +400,61 @@ class JsonStructureTracker {
 }
 
 class JsonRpcFrameExtractor {
-  readonly #messages = new Map<string, ObservedJsonRpcMessage>();
-  readonly #parser: JSONParser;
-  readonly #structure: JsonStructureTracker;
+  readonly #decoder = new StringDecoder('utf8');
+  readonly #extractor = new JsonRpcTokenExtractor();
+  readonly #parser: RawJsonParser;
   #invalid = false;
 
   constructor() {
-    this.#structure = new JsonStructureTracker(this.#messages);
-    this.#parser = new JSONParser({
-      paths: STREAM_PATHS,
-      keepStack: false,
-      stringBufferSize: 64 * 1024,
-      numberBufferSize: 64,
+    this.#parser = createRawJsonParser({
+      packKeys: false,
+      packStrings: false,
+      packNumbers: false,
+      streamKeys: true,
+      streamStrings: true,
+      streamNumbers: true,
     });
-    this.#parser.onToken = (token) => this.#structure.accept(token);
-    this.#parser.onValue = (value) => this.#capture(value);
-    this.#parser.onError = () => {
-      this.#invalid = true;
-    };
   }
 
   write(bytes: Uint8Array): void {
     if (this.#invalid || bytes.length === 0) return;
+    for (let offset = 0; offset < bytes.length; offset += PARSER_INPUT_CHUNK_BYTES) {
+      const slice = bytes.subarray(offset, offset + PARSER_INPUT_CHUNK_BYTES);
+      const buffer = Buffer.isBuffer(slice)
+        ? slice
+        : Buffer.from(slice.buffer, slice.byteOffset, slice.byteLength);
+      this.#writeText(this.#decoder.write(buffer));
+      if (this.#invalid) return;
+    }
+  }
+
+  finish(): ObservedJsonRpcMessage[] {
+    if (!this.#invalid) {
+      this.#writeText(this.#decoder.end());
+      try {
+        this.#acceptResult(this.#parser(none));
+      } catch {
+        this.#invalid = true;
+      }
+    }
+    return this.#invalid ? [] : this.#extractor.messages;
+  }
+
+  get bufferedMetadataBytes(): number {
+    return this.#extractor.bufferedMetadataBytes;
+  }
+
+  #writeText(text: string): void {
+    if (this.#invalid || text.length === 0) return;
     try {
-      this.#parser.write(bytes);
+      this.#acceptResult(this.#parser(text));
     } catch {
       this.#invalid = true;
     }
   }
 
-  finish(): ObservedJsonRpcMessage[] {
-    if (!this.#invalid && !this.#parser.isEnded) {
-      try {
-        this.#parser.end();
-      } catch {
-        this.#invalid = true;
-      }
-    }
-    return this.#invalid ? [] : [...this.#messages.values()];
-  }
-
-  #capture({ value, key, stack }: ParsedElementInfo.ParsedElementInfo): void {
-    const path = [
-      ...stack.slice(1).flatMap((item) => item.key === undefined ? [] : [item.key]),
-      ...(key === undefined ? [] : [key]),
-    ];
-    const location = messagePath(path);
-    if (location === undefined) return;
-    const relative = location.relative.join('.');
-    if (!['id', 'method', 'params.name', 'result.isError', 'error.code'].includes(relative)) {
-      return;
-    }
-
-    let message = this.#messages.get(location.key);
-    if (message === undefined) {
-      message = { hasResult: false, hasError: false, isError: false };
-      this.#messages.set(location.key, message);
-    }
-    if (relative === 'id' && (typeof value === 'string' || typeof value === 'number')) {
-      message.id = value;
-    } else if (relative === 'method' && typeof value === 'string') {
-      message.method = value;
-    } else if (relative === 'params.name' && typeof value === 'string') {
-      message.name = value;
-    } else if (relative === 'result.isError' && value === true) {
-      message.isError = true;
-    } else if (relative === 'error.code') {
-      message.hasError = true;
-    }
+  #acceptResult(result: unknown): void {
+    for (const token of tokensFrom(result)) this.#extractor.accept(token);
   }
 }
 
@@ -311,7 +469,11 @@ class JsonRpcMessageStream {
 
   push(chunk: string | Uint8Array): void {
     if (this.#ended) return;
-    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
+    const bytes = typeof chunk === 'string'
+      ? Buffer.from(chunk)
+      : Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     let offset = 0;
     let newline = bytes.indexOf(0x0a, offset);
     while (newline !== -1) {
@@ -327,6 +489,10 @@ class JsonRpcMessageStream {
     if (this.#ended) return;
     this.#ended = true;
     this.#finishFrame();
+  }
+
+  get bufferedMetadataBytes(): number {
+    return this.#frame.bufferedMetadataBytes;
   }
 
   #finishFrame(): void {
@@ -369,42 +535,42 @@ export class McpProtocolObserver {
     );
   }
 
+  get bufferedMetadataBytes(): number {
+    let total = this.#clientStream.bufferedMetadataBytes +
+      this.#serverStream.bufferedMetadataBytes;
+    for (const call of this.#inFlight.values()) {
+      total += Buffer.byteLength(call.name);
+      if (typeof call.id === 'string') total += Buffer.byteLength(call.id);
+    }
+    return total;
+  }
+
   observeClientLine(line: string | Uint8Array): void {
     if (this.#closed || this.#disabled) return;
-
     const parsed = parseLine(line);
-    if (parsed === undefined) return;
-
-    this.#observeClientMessages(observedMessages(parsed));
+    if (parsed !== undefined) this.#observeClientMessages(observedMessages(parsed));
   }
 
   observeServerLine(line: string | Uint8Array): void {
     if (this.#closed || this.#disabled) return;
-
     const parsed = parseLine(line);
-    if (parsed === undefined) return;
-
-    this.#observeServerMessages(observedMessages(parsed));
+    if (parsed !== undefined) this.#observeServerMessages(observedMessages(parsed));
   }
 
   observeClientChunk(chunk: string | Uint8Array): void {
-    if (this.#closed || this.#disabled) return;
-    this.#clientStream.push(chunk);
+    if (!this.#closed && !this.#disabled) this.#clientStream.push(chunk);
   }
 
   observeServerChunk(chunk: string | Uint8Array): void {
-    if (this.#closed || this.#disabled) return;
-    this.#serverStream.push(chunk);
+    if (!this.#closed && !this.#disabled) this.#serverStream.push(chunk);
   }
 
   endClientStream(): void {
-    if (this.#closed || this.#disabled) return;
-    this.#clientStream.end();
+    if (!this.#closed && !this.#disabled) this.#clientStream.end();
   }
 
   endServerStream(): void {
-    if (this.#closed || this.#disabled) return;
-    this.#serverStream.end();
+    if (!this.#closed && !this.#disabled) this.#serverStream.end();
   }
 
   close(): void {
@@ -414,19 +580,14 @@ export class McpProtocolObserver {
       this.#serverStream.end();
     }
     this.#closed = true;
-
-    for (const call of this.#inFlight.values()) {
-      this.#record(call, 'unknown');
-    }
+    for (const call of this.#inFlight.values()) this.#record(call, 'unknown');
     this.#inFlight.clear();
   }
 
   #observeClientMessages(streamMessages: ObservedJsonRpcMessage[]): void {
     for (const message of streamMessages) {
       if (message.method !== 'tools/call') continue;
-      if (typeof message.id !== 'string' && typeof message.id !== 'number') continue;
-      if (typeof message.name !== 'string') continue;
-
+      if (!isValidId(message.id) || !isValidToolName(message.name)) continue;
       const call: InFlightCall = {
         id: message.id,
         name: message.name,
@@ -438,13 +599,11 @@ export class McpProtocolObserver {
 
   #observeServerMessages(streamMessages: ObservedJsonRpcMessage[]): void {
     for (const message of streamMessages) {
-      if (typeof message.id !== 'string' && typeof message.id !== 'number') continue;
+      if (!isValidId(message.id)) continue;
       if (!message.hasResult && !message.hasError) continue;
-
       const key = requestKey(message.id);
       const call = this.#inFlight.get(key);
       if (call === undefined) continue;
-
       this.#inFlight.delete(key);
       this.#record(call, message.hasError || message.isError ? 'failure' : 'success');
     }
