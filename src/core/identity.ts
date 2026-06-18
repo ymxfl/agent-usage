@@ -28,7 +28,7 @@ export function injectedDedupeKey(
 
 export function proxyDedupeKey(
   connectionId: string,
-  requestId: string,
+  requestId: string | number,
 ): string {
   return `proxy:${connectionId}:${requestId}`;
 }

@@ -13,7 +13,7 @@ describe('stableSkillId', () => {
     const second = stableSkillId('codex', 'project', '/repo/.codex/skills/testing');
 
     expect(first).toBe(second);
-    expect(first).toMatch(/^codex:project:[0-9a-f]{16}$/);
+    expect(first).toBe('codex:project:a35a0f14a2e189d4');
   });
 
   it('does not expose the canonical path', () => {
@@ -50,6 +50,12 @@ describe('dedupe keys', () => {
   it('formats MCP proxy keys', () => {
     expect(proxyDedupeKey('connection-123', 'request-456')).toBe(
       'proxy:connection-123:request-456',
+    );
+  });
+
+  it('formats numeric MCP proxy request IDs', () => {
+    expect(proxyDedupeKey('connection-123', 456)).toBe(
+      'proxy:connection-123:456',
     );
   });
 });

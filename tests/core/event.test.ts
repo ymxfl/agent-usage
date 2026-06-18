@@ -27,6 +27,19 @@ describe('parseUsageEvent', () => {
     expect(parseUsageEvent(event)).toEqual(event);
   });
 
+  it('parses a valid MCP call event', () => {
+    const { skillId: _, ...withoutSkillId } = baseEvent;
+    const event = {
+      ...withoutSkillId,
+      kind: 'mcp_call',
+      name: 'tools/call',
+      mcpServer: 'github',
+      evidence: 'mcp_proxy',
+    } as const;
+
+    expect(parseUsageEvent(event)).toEqual(event);
+  });
+
   it('rejects unknown properties so content cannot enter the event', () => {
     expect(() => parseUsageEvent({ ...baseEvent, prompt: 'secret' })).toThrow();
   });
@@ -40,11 +53,47 @@ describe('parseUsageEvent', () => {
     },
   );
 
+  it.each(['skill_session_load', 'skill_invocation'] as const)(
+    'rejects an empty skillId for %s events',
+    (kind) => {
+      expect(() => parseUsageEvent({ ...baseEvent, kind, skillId: '' })).toThrow();
+    },
+  );
+
   it('requires mcpServer for mcp_call events', () => {
     const { skillId: _, ...withoutSkillId } = baseEvent;
 
     expect(() =>
       parseUsageEvent({ ...withoutSkillId, kind: 'mcp_call', name: 'tools/call' }),
     ).toThrow();
+  });
+
+  it('rejects an empty mcpServer for mcp_call events', () => {
+    const { skillId: _, ...withoutSkillId } = baseEvent;
+
+    expect(() =>
+      parseUsageEvent({
+        ...withoutSkillId,
+        kind: 'mcp_call',
+        name: 'tools/call',
+        mcpServer: '',
+      }),
+    ).toThrow();
+  });
+
+  it.each(['sessionId', 'project'] as const)(
+    'rejects an empty optional %s',
+    (field) => {
+      expect(() => parseUsageEvent({ ...baseEvent, [field]: '' })).toThrow();
+    },
+  );
+
+  it.each([
+    ['kind', 'skill_started'],
+    ['outcome', 'partial'],
+    ['evidence', 'log_scan'],
+    ['precision', 'estimated'],
+  ] as const)('rejects values outside the %s enum', (field, value) => {
+    expect(() => parseUsageEvent({ ...baseEvent, [field]: value })).toThrow();
   });
 });
