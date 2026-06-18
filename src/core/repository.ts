@@ -1,6 +1,11 @@
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 import type { UsageEvent } from './event.js';
+import {
+  queryUsageReport,
+  type QueryFilter,
+  type UsageReport,
+} from './query.js';
 
 export class UsageRepository {
   readonly #database: DatabaseSync;
@@ -56,5 +61,9 @@ export class UsageRepository {
   count(): number {
     const row = this.#countStatement.get() as { count: number | bigint };
     return Number(row.count);
+  }
+
+  report(filter: QueryFilter, rangeLabel: string): UsageReport {
+    return queryUsageReport(this.#database, filter, rangeLabel);
   }
 }

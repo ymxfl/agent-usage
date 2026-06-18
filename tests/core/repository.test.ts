@@ -35,6 +35,15 @@ async function runConcurrentWriter(file: string, prefix: string): Promise<void> 
       '--input-type=module',
       '--eval',
       `
+      const { registerHooks } = await import('node:module');
+      registerHooks({
+        resolve(specifier, context, nextResolve) {
+          if (specifier.endsWith('.js') && context.parentURL?.endsWith('.ts')) {
+            return nextResolve(specifier.slice(0, -3) + '.ts', context);
+          }
+          return nextResolve(specifier, context);
+        },
+      });
       const { openUsageDatabase } = await import(process.env.DATABASE_MODULE);
       const { UsageRepository } = await import(process.env.REPOSITORY_MODULE);
       const database = openUsageDatabase(process.env.DATABASE_FILE);
