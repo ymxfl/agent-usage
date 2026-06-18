@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
+import { Readable, Writable } from 'node:stream';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +22,7 @@ import type {
   StdioProtocolObserver,
   StdioProxyOptions,
 } from '../src/proxy/stdio-proxy.js';
+import { runStdioProxy } from '../src/proxy/stdio-proxy.js';
 import { usageEvent } from './helpers/usage-fixtures.js';
 
 const tempDirectories: string[] = [];
@@ -149,6 +151,18 @@ describe('lifecycle commands', () => {
       expect(adapter[command]).toHaveBeenCalledWith('project');
       expect(fixture.stdout.join('')).toContain('success: complete');
       expect(fixture.exitCodes).toEqual([]);
+    },
+  );
+
+  it.each(['install', 'sync', 'repair', 'uninstall'] as const)(
+    'defaults %s to user scope',
+    async (command) => {
+      const adapter = fakeAdapter();
+      const fixture = runtimeFixture();
+
+      await parse(registryWith(adapter), fixture.runtime, [command, 'codex']);
+
+      expect(adapter[command]).toHaveBeenCalledWith('user');
     },
   );
 
@@ -310,6 +324,115 @@ describe('mcp and proxy', () => {
     });
     expect(fixture.exitCodes).toEqual([23]);
   });
+
+  it('forwards child flags without an explicit option separator', async () => {
+    const runProxy = vi.fn<CliRuntime['runProxy']>(async () => ({
+      code: 0,
+      signal: null,
+    }));
+    const fixture = runtimeFixture({ runProxy });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      [
+        'proxy',
+        '--agent',
+        'codex',
+        '--server',
+        'docs',
+        'fake-server',
+        '--child-flag',
+        'value',
+        '-x',
+      ],
+    );
+
+    expect(runProxy).toHaveBeenCalledWith(
+      'fake-server',
+      ['--child-flag', 'value', '-x'],
+      expect.anything(),
+      expect.objectContaining({ cwd: process.cwd() }),
+    );
+  });
+
+  it('launches and relays the child when telemetry storage cannot open', async () => {
+    const output: string[] = [];
+    const logger = { error: vi.fn() };
+    const fixture = runtimeFixture({
+      openDatabase: () => {
+        throw new Error('storage unavailable');
+      },
+      logger,
+      runProxy: (command, args, observer, options) =>
+        runStdioProxy(command, args, observer, {
+          ...options,
+          input: Readable.from([]),
+          output: new Writable({
+            write(chunk, _encoding, callback) {
+              output.push(chunk.toString());
+              callback();
+            },
+          }),
+          error: new Writable({
+            write(_chunk, _encoding, callback) {
+              callback();
+            },
+          }),
+        }),
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      [
+        'proxy',
+        '--agent',
+        'codex',
+        '--server',
+        'docs',
+        '--',
+        process.execPath,
+        '-e',
+        'process.stdout.write("child survived\\n"); process.exit(7)',
+      ],
+    );
+
+    expect(output.join('')).toBe('child survived\n');
+    expect(fixture.exitCodes).toEqual([7]);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to initialize proxy telemetry',
+      expect.objectContaining({ message: 'storage unavailable' }),
+    );
+  });
+
+  it.each(['paths', 'repository'] as const)(
+    'still dispatches proxy when %s telemetry initialization fails',
+    async (failure) => {
+      const runProxy = vi.fn<CliRuntime['runProxy']>(async () => ({
+        code: 0,
+        signal: null,
+      }));
+      const fixture = runtimeFixture({ runProxy, logger: { error: vi.fn() } });
+      if (failure === 'paths') {
+        fixture.runtime.paths = () => {
+          throw new Error('paths unavailable');
+        };
+      } else {
+        fixture.runtime.createRepository = () => {
+          throw new Error('repository unavailable');
+        };
+      }
+
+      await parse(
+        new AdapterRegistry(),
+        fixture.runtime,
+        ['proxy', '--agent', 'codex', '--server', 'docs', '--', 'server'],
+      );
+
+      expect(runProxy).toHaveBeenCalledOnce();
+    },
+  );
 
   it('forwards child signal semantics', async () => {
     const signalSelf = vi.fn<(signal: NodeJS.Signals) => void>();
@@ -524,6 +647,26 @@ describe('uninstall purge safeguards', () => {
         'project',
         '--purge-data',
         '--yes',
+      ],
+    );
+
+    expect(purgeData).toHaveBeenCalledOnce();
+  });
+
+  it('accepts -y as explicit non-TTY purge confirmation', async () => {
+    const purgeData = vi.fn<() => void>();
+    const fixture = runtimeFixture({ purgeData, isTTY: () => false });
+
+    await parse(
+      registryWith(fakeAdapter()),
+      fixture.runtime,
+      [
+        'uninstall',
+        'codex',
+        '--scope',
+        'user',
+        '--purge-data',
+        '-y',
       ],
     );
 

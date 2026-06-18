@@ -169,6 +169,57 @@ function printCapabilities(
   }
 }
 
+function logTelemetryError(
+  runtime: CliRuntime,
+  message: string,
+  error: unknown,
+): void {
+  try {
+    runtime.logger.error(message, error);
+  } catch {
+    // Telemetry diagnostics must never interfere with the proxied child.
+  }
+}
+
+function initializeProxyTelemetry(
+  runtime: CliRuntime,
+  agent: string,
+  server: string,
+): { database: CliDatabase | undefined; observer: McpProtocolObserver } {
+  let database: CliDatabase | undefined;
+  let emit: (event: UsageEvent) => unknown = () => false;
+
+  try {
+    database = runtime.openDatabase(runtime.paths().database);
+    const repository = runtime.createRepository(database);
+    emit = (event) => repository.insert(event);
+  } catch (error) {
+    logTelemetryError(runtime, 'Failed to initialize proxy telemetry', error);
+  }
+
+  return {
+    database,
+    observer: new McpProtocolObserver(
+      agent,
+      server,
+      runtime.randomId(),
+      emit,
+      runtime.logger,
+    ),
+  };
+}
+
+function closeProxyTelemetry(
+  runtime: CliRuntime,
+  database: CliDatabase | undefined,
+): void {
+  try {
+    database?.close();
+  } catch (error) {
+    logTelemetryError(runtime, 'Failed to close proxy telemetry', error);
+  }
+}
+
 async function remainingManifests(
   registry: AdapterRegistry,
 ): Promise<string[]> {
@@ -231,10 +282,11 @@ function addLifecycleCommand(
 ): void {
   program
     .command(`${operation} <agent>`)
-    .requiredOption(
+    .option(
       '--scope <scope>',
       'configuration scope',
       (value) => choice(value, scopes, 'scope'),
+      'user',
     )
     .action(async (agent: string, options: { scope: Scope }, command: Command) => {
       const adapter = selectedAdapter(command, registry, agent);
@@ -252,6 +304,7 @@ export function createProgram(
   program
     .name('agent-usage')
     .description('Track and report coding-agent skill and MCP usage')
+    .enablePositionalOptions()
     .exitOverride()
     .configureOutput({
       writeOut: runtime.writeOutput,
@@ -319,6 +372,8 @@ export function createProgram(
     .requiredOption('--agent <agent>', 'agent id')
     .requiredOption('--server <server>', 'MCP server name')
     .argument('<command...>', 'server command and arguments')
+    .allowUnknownOption()
+    .passThroughOptions()
     .action(
       async (
         commandAndArguments: string[],
@@ -329,20 +384,21 @@ export function createProgram(
           program.error('missing server command');
           return;
         }
-        const database = runtime.openDatabase(runtime.paths().database);
+        const telemetry = initializeProxyTelemetry(
+          runtime,
+          options.agent,
+          options.server,
+        );
         try {
-          const repository = runtime.createRepository(database);
-          const observer = new McpProtocolObserver(
-            options.agent,
-            options.server,
-            runtime.randomId(),
-            (event) => repository.insert(event),
-            runtime.logger,
+          const child = await runtime.runProxy(
+            command,
+            args,
+            telemetry.observer,
+            {
+              cwd: runtime.cwd(),
+              env: runtime.env,
+            },
           );
-          const child = await runtime.runProxy(command, args, observer, {
-            cwd: runtime.cwd(),
-            env: runtime.env,
-          });
           if (child.signal !== null) runtime.signalSelf(child.signal);
           else if (child.code !== null && child.code !== 0) {
             runtime.setExitCode(child.code);
@@ -350,7 +406,7 @@ export function createProgram(
             runtime.setExitCode(1);
           }
         } finally {
-          database.close();
+          closeProxyTelemetry(runtime, telemetry.database);
         }
       },
     );
@@ -361,13 +417,14 @@ export function createProgram(
 
   program
     .command('uninstall <agent>')
-    .requiredOption(
+    .option(
       '--scope <scope>',
       'configuration scope',
       (value) => choice(value, scopes, 'scope'),
+      'user',
     )
     .option('--purge-data', 'delete shared usage data after uninstalling')
-    .option('--yes', 'confirm shared data deletion')
+    .option('-y, --yes', 'confirm shared data deletion')
     .action(
       async (
         agent: string,
