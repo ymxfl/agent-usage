@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "@streamparser/json": "^0.0.22",
     "commander": "^15.0.0",
     "zod": "^4.0.0"
   },

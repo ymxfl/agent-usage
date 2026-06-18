@@ -5,14 +5,12 @@ import { describe, expect, it } from 'vitest';
 
 import type { UsageEvent } from '../../src/core/event.js';
 import { McpProtocolObserver } from '../../src/proxy/protocol.js';
-import {
-  MAX_OBSERVABLE_FRAME_BYTES,
-  runStdioProxy,
-} from '../../src/proxy/stdio-proxy.js';
+import { runStdioProxy } from '../../src/proxy/stdio-proxy.js';
 
 const fakeServer = fileURLToPath(
   new URL('../fixtures/fake-mcp-server.mjs', import.meta.url),
 );
+const LARGE_FRAME_BYTES = (1024 * 1024) + 1;
 
 function capture(stream: PassThrough): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -47,6 +45,8 @@ class CountingObserver {
   clientLines: string[] = [];
   serverLines: string[] = [];
   closeCount = 0;
+  #clientPending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  #serverPending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 
   observeClientLine(line: string | Uint8Array): void {
     this.clientLines.push(Buffer.from(line).toString());
@@ -56,8 +56,53 @@ class CountingObserver {
     this.serverLines.push(Buffer.from(line).toString());
   }
 
+  observeClientChunk(chunk: string | Uint8Array): void {
+    this.#clientPending = this.#consume(
+      this.#clientPending,
+      chunk,
+      this.clientLines,
+    );
+  }
+
+  observeServerChunk(chunk: string | Uint8Array): void {
+    this.#serverPending = this.#consume(
+      this.#serverPending,
+      chunk,
+      this.serverLines,
+    );
+  }
+
+  endClientStream(): void {
+    if (this.#clientPending.length > 0) {
+      this.clientLines.push(this.#clientPending.toString());
+      this.#clientPending = Buffer.alloc(0);
+    }
+  }
+
+  endServerStream(): void {
+    if (this.#serverPending.length > 0) {
+      this.serverLines.push(this.#serverPending.toString());
+      this.#serverPending = Buffer.alloc(0);
+    }
+  }
+
   close(): void {
     this.closeCount += 1;
+  }
+
+  #consume(
+    pending: Buffer,
+    chunk: string | Uint8Array,
+    lines: string[],
+  ): Buffer {
+    let bytes = Buffer.concat([pending, Buffer.from(chunk)]);
+    let newline = bytes.indexOf(0x0a);
+    while (newline !== -1) {
+      lines.push(bytes.subarray(0, newline).toString());
+      bytes = bytes.subarray(newline + 1);
+      newline = bytes.indexOf(0x0a);
+    }
+    return bytes;
   }
 }
 
@@ -264,10 +309,16 @@ describe('runStdioProxy', () => {
     output.destroy();
   });
 
-  it('skips oversized observation frames while relaying every byte unchanged', async () => {
-    const observer = new CountingObserver();
+  it('fails open on oversized malformed frames while relaying every byte unchanged', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'large-malformed-connection',
+      (event) => events.push(event),
+    );
     const fixture = proxyFixture('echo', observer);
-    const oversized = Buffer.alloc(MAX_OBSERVABLE_FRAME_BYTES + 1, 0x78);
+    const oversized = Buffer.alloc(LARGE_FRAME_BYTES, 0x78);
     const suffix = Buffer.from('\nsmall\n');
     const expected = Buffer.concat([oversized, suffix]);
 
@@ -278,8 +329,92 @@ describe('runStdioProxy', () => {
 
     await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
     await expect(fixture.outputDone).resolves.toEqual(expected);
-    expect(observer.clientLines).toEqual(['small']);
-    expect(observer.serverLines).toEqual(['small']);
+    expect(events).toEqual([]);
+  });
+
+  it('records exact calls when oversized arguments precede or follow metadata', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'large-request-connection',
+      (event) => events.push(event),
+    );
+    const fixture = proxyFixture('protocol', observer);
+    const secretBefore = `before-secret-${'b'.repeat(LARGE_FRAME_BYTES)}`;
+    const secretAfter = `after-secret-${'a'.repeat(LARGE_FRAME_BYTES)}`;
+    const beforeMetadata =
+      `{"params":{"arguments":{"secret":${JSON.stringify(secretBefore)}},"name":"huge_before"},` +
+      '"method":"tools/call","id":101,"jsonrpc":"2.0"}\n';
+    const afterMetadata =
+      '{"jsonrpc":"2.0","id":102,"method":"tools/call","params":{"name":"huge_after",' +
+      `"arguments":{"secret":${JSON.stringify(secretAfter)}}}}\n`;
+
+    fixture.input.write(beforeMetadata);
+    fixture.input.end(afterMetadata);
+
+    await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
+    expect(events.map(({ name, outcome }) => ({ name, outcome }))).toEqual([
+      { name: 'huge_before', outcome: 'success' },
+      { name: 'huge_after', outcome: 'success' },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('before-secret');
+    expect(JSON.stringify(events)).not.toContain('after-secret');
+    expect(JSON.stringify(observer)).not.toContain('before-secret');
+    expect(JSON.stringify(observer)).not.toContain('after-secret');
+  });
+
+  it('matches an oversized valid response without retaining its result payload', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'large-response-connection',
+      (event) => events.push(event),
+    );
+    const fixture = proxyFixture('protocol', observer);
+    fixture.input.end(
+      '{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"huge_response"}}\n',
+    );
+
+    await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
+    const responseBytes = await fixture.outputDone;
+
+    expect(responseBytes.length).toBeGreaterThan(LARGE_FRAME_BYTES);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      name: 'huge_response',
+      outcome: 'success',
+      precision: 'exact',
+    });
+    expect(JSON.stringify(events)).not.toContain('response-secret');
+    expect(JSON.stringify(observer)).not.toContain('response-secret');
+  });
+
+  it('records every entry in an oversized batch without retaining arguments', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'large-batch-connection',
+      (event) => events.push(event),
+    );
+    const fixture = proxyFixture('protocol', observer);
+    const secret = `batch-secret-${'s'.repeat(LARGE_FRAME_BYTES)}`;
+    const batch =
+      `[{"params":{"arguments":{"secret":${JSON.stringify(secret)}},"name":"batch_one"},` +
+      '"method":"tools/call","id":201,"jsonrpc":"2.0"},' +
+      '{"jsonrpc":"2.0","id":"202","method":"tools/call","params":{"name":"batch_two"}}]\n';
+
+    fixture.input.end(batch);
+
+    await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
+    expect(events.map(({ name, outcome }) => ({ name, outcome }))).toEqual([
+      { name: 'batch_one', outcome: 'success' },
+      { name: 'batch_two', outcome: 'success' },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('batch-secret');
+    expect(JSON.stringify(observer)).not.toContain('batch-secret');
   });
 
   it('observes success, error, batches, odd whitespace, and a final partial frame', async () => {

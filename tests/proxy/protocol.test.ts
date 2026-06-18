@@ -95,6 +95,24 @@ describe('McpProtocolObserver', () => {
     ]);
   });
 
+  it('streams batch entries after an empty array value', () => {
+    const { observer, events } = fixture();
+    observer.observeClientChunk(
+      '[{"id":1,"method":"tools/call","params":{"name":"first"}},' +
+      '{"id":2,"method":"tools/call","params":{"name":"second"}}]\n',
+    );
+    observer.endClientStream();
+    observer.observeServerChunk(
+      '[{"result":[],"id":1},{"result":{},"id":2}]\n',
+    );
+    observer.endServerStream();
+
+    expect(events.map(({ name, outcome }) => ({ name, outcome }))).toEqual([
+      { name: 'first', outcome: 'success' },
+      { name: 'second', outcome: 'success' },
+    ]);
+  });
+
   it('ignores malformed, notification, non-tool, unmatched, and invalid-name messages', () => {
     const { observer, events } = fixture();
 

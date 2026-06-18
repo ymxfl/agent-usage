@@ -46,6 +46,15 @@ if (mode === 'echo') {
         result: { cwd: process.cwd(), env: process.env.FAKE_PROXY_ENV ?? null },
       };
     }
+    if (name === 'huge_response') {
+      return {
+        jsonrpc: '2.0',
+        id: message.id,
+        result: {
+          content: [{ type: 'text', text: `response-secret-${'r'.repeat((1024 * 1024) + 1)}` }],
+        },
+      };
+    }
     return { jsonrpc: '2.0', id: message.id, result: { content: [{ type: 'text', text: 'ok' }] } };
   }
 

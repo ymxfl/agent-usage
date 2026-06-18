@@ -2,8 +2,10 @@ import { spawn } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 
 export interface StdioProtocolObserver {
-  observeClientLine(line: string | Uint8Array): void;
-  observeServerLine(line: string | Uint8Array): void;
+  observeClientChunk(chunk: string | Uint8Array): void;
+  observeServerChunk(chunk: string | Uint8Array): void;
+  endClientStream(): void;
+  endServerStream(): void;
   close(): void;
 }
 
@@ -18,77 +20,6 @@ export interface StdioProxyOptions {
 export interface StdioProxyResult {
   code: number | null;
   signal: NodeJS.Signals | null;
-}
-
-/** Frames larger than this are relayed but omitted from protocol observation. */
-export const MAX_OBSERVABLE_FRAME_BYTES = 1024 * 1024;
-
-class LineBuffer {
-  #parts: Buffer[] = [];
-  #size = 0;
-  #skipping = false;
-  #flushed = false;
-  readonly #observe: (line: Uint8Array) => void;
-
-  constructor(observe: (line: Uint8Array) => void) {
-    this.#observe = observe;
-  }
-
-  push(chunk: Buffer | string): void {
-    if (this.#flushed) return;
-    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk);
-    let offset = 0;
-
-    while (offset < bytes.length) {
-      const newline = bytes.indexOf(0x0a, offset);
-      const end = newline === -1 ? bytes.length : newline;
-      this.#append(bytes.subarray(offset, end));
-
-      if (newline === -1) break;
-      if (!this.#skipping) this.#send(this.#joinedParts());
-      this.#resetFrame();
-      offset = newline + 1;
-    }
-  }
-
-  flush(): void {
-    if (this.#flushed) return;
-    this.#flushed = true;
-    if (!this.#skipping && this.#size > 0) this.#send(this.#joinedParts());
-    this.#resetFrame();
-  }
-
-  #append(bytes: Buffer): void {
-    if (this.#skipping || bytes.length === 0) return;
-    if (this.#size + bytes.length > MAX_OBSERVABLE_FRAME_BYTES) {
-      this.#parts = [];
-      this.#size = 0;
-      this.#skipping = true;
-      return;
-    }
-
-    this.#parts.push(bytes);
-    this.#size += bytes.length;
-  }
-
-  #joinedParts(): Buffer {
-    if (this.#parts.length === 1) return this.#parts[0] as Buffer;
-    return Buffer.concat(this.#parts, this.#size);
-  }
-
-  #resetFrame(): void {
-    this.#parts = [];
-    this.#size = 0;
-    this.#skipping = false;
-  }
-
-  #send(line: Uint8Array): void {
-    try {
-      this.#observe(line);
-    } catch {
-      // Observation is deliberately out-of-band from the protocol relay.
-    }
-  }
 }
 
 interface RelayController {
@@ -177,8 +108,14 @@ export function runStdioProxy(
     ...(options.env === undefined ? {} : { env: options.env }),
   };
   const child = spawn(command, [...args], spawnOptions);
-  const clientLines = new LineBuffer((line) => observer.observeClientLine(line));
-  const serverLines = new LineBuffer((line) => observer.observeServerLine(line));
+  const clientLines = {
+    push: (chunk: Buffer | string) => observer.observeClientChunk(chunk),
+    flush: () => observer.endClientStream(),
+  };
+  const serverLines = {
+    push: (chunk: Buffer | string) => observer.observeServerChunk(chunk),
+    flush: () => observer.endServerStream(),
+  };
   const signalNames = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
   return new Promise<StdioProxyResult>((resolve, reject) => {
