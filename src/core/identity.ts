@@ -30,5 +30,5 @@ export function proxyDedupeKey(
   connectionId: string,
   requestId: string | number,
 ): string {
-  return `proxy:${connectionId}:${requestId}`;
+  return `proxy:${connectionId}:${JSON.stringify(requestId)}`;
 }

@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import { parseUsageEvent } from '../../src/core/event.js';
+import { parseUsageEvent, type UsageEvent } from '../../src/core/event.js';
 
 const baseEvent = {
   schemaVersion: 1,
@@ -95,5 +95,17 @@ describe('parseUsageEvent', () => {
     ['precision', 'estimated'],
   ] as const)('rejects values outside the %s enum', (field, value) => {
     expect(() => parseUsageEvent({ ...baseEvent, [field]: value })).toThrow();
+  });
+
+  it('requires cross-field identifiers in the static event type', () => {
+    const assertCrossFields = (event: UsageEvent) => {
+      if (event.kind === 'mcp_call') {
+        expectTypeOf(event.mcpServer).toEqualTypeOf<string>();
+      } else {
+        expectTypeOf(event.skillId).toEqualTypeOf<string>();
+      }
+    };
+
+    expectTypeOf(assertCrossFields).toBeFunction();
   });
 });

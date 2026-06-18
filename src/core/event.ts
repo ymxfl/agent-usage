@@ -1,40 +1,47 @@
 import { z } from 'zod';
 
-const usageEventSchema = z
-  .object({
-    schemaVersion: z.literal(1),
-    occurredAt: z.string().datetime(),
-    agent: z.string().min(1),
-    sessionId: z.string().min(1).optional(),
-    project: z.string().min(1).optional(),
-    kind: z.enum(['skill_session_load', 'skill_invocation', 'mcp_call']),
-    name: z.string().min(1),
-    skillId: z.string().min(1).optional(),
-    mcpServer: z.string().min(1).optional(),
-    outcome: z.enum(['success', 'failure', 'unknown']),
-    durationMs: z.number().nonnegative().optional(),
-    evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy']),
-    precision: z.enum(['exact', 'best_effort']),
-    dedupeKey: z.string().min(1),
-  })
-  .strict()
-  .superRefine((event, context) => {
-    if (event.kind !== 'mcp_call' && event.skillId === undefined) {
-      context.addIssue({
-        code: 'custom',
-        message: 'skillId is required for skill events',
-        path: ['skillId'],
-      });
-    }
+const sharedUsageEventShape = {
+  schemaVersion: z.literal(1),
+  occurredAt: z.string().datetime(),
+  agent: z.string().min(1),
+  sessionId: z.string().min(1).optional(),
+  project: z.string().min(1).optional(),
+  name: z.string().min(1),
+  outcome: z.enum(['success', 'failure', 'unknown']),
+  durationMs: z.number().nonnegative().optional(),
+  evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy']),
+  precision: z.enum(['exact', 'best_effort']),
+  dedupeKey: z.string().min(1),
+};
 
-    if (event.kind === 'mcp_call' && event.mcpServer === undefined) {
-      context.addIssue({
-        code: 'custom',
-        message: 'mcpServer is required for mcp_call events',
-        path: ['mcpServer'],
-      });
-    }
-  });
+const skillUsageEventShape = {
+  ...sharedUsageEventShape,
+  skillId: z.string().min(1),
+  mcpServer: z.string().min(1).optional(),
+};
+
+const usageEventSchema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      ...skillUsageEventShape,
+      kind: z.literal('skill_session_load'),
+    })
+    .strict(),
+  z
+    .object({
+      ...skillUsageEventShape,
+      kind: z.literal('skill_invocation'),
+    })
+    .strict(),
+  z
+    .object({
+      ...sharedUsageEventShape,
+      kind: z.literal('mcp_call'),
+      skillId: z.string().min(1).optional(),
+      mcpServer: z.string().min(1),
+    })
+    .strict(),
+]);
 
 export type UsageEvent = z.infer<typeof usageEventSchema>;
 

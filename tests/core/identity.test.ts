@@ -29,6 +29,22 @@ describe('stableSkillId', () => {
       stableSkillId('codex', 'project', canonicalPath),
     );
   });
+
+  it('returns different identifiers for different agents', () => {
+    const canonicalPath = '/repo/.codex/skills/testing';
+
+    expect(stableSkillId('codex', 'project', canonicalPath)).not.toBe(
+      stableSkillId('claude-code', 'project', canonicalPath),
+    );
+  });
+
+  it('returns different identifiers for different canonical paths', () => {
+    expect(
+      stableSkillId('codex', 'project', '/repo/.codex/skills/testing'),
+    ).not.toBe(
+      stableSkillId('codex', 'project', '/repo/.codex/skills/debugging'),
+    );
+  });
 });
 
 describe('dedupe keys', () => {
@@ -49,13 +65,19 @@ describe('dedupe keys', () => {
 
   it('formats MCP proxy keys', () => {
     expect(proxyDedupeKey('connection-123', 'request-456')).toBe(
-      'proxy:connection-123:request-456',
+      'proxy:connection-123:"request-456"',
     );
   });
 
   it('formats numeric MCP proxy request IDs', () => {
     expect(proxyDedupeKey('connection-123', 456)).toBe(
       'proxy:connection-123:456',
+    );
+  });
+
+  it('distinguishes numeric proxy request IDs from numeric strings', () => {
+    expect(proxyDedupeKey('connection-123', 456)).not.toBe(
+      proxyDedupeKey('connection-123', '456'),
     );
   });
 });
