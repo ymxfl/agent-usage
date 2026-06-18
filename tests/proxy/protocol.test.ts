@@ -158,6 +158,50 @@ describe('McpProtocolObserver', () => {
     expect(events).toEqual([]);
   });
 
+  it('correlates requests with long nested argument keys before and after metadata', () => {
+    const { observer, events } = fixture();
+    const longKey = 'k'.repeat(65);
+    observer.observeClientChunk(
+      `{"params":{"arguments":{"${longKey}":"before"},"name":"before"},` +
+      '"method":"tools/call","id":401}\n',
+    );
+    observer.observeClientChunk(
+      `{"id":402,"method":"tools/call","params":{"name":"after",` +
+      `"arguments":{"nested":{"${longKey}":"after"}}}}\n`,
+    );
+    observer.endClientStream();
+    observer.observeServerChunk('{"id":401,"result":{}}\n');
+    observer.observeServerChunk('{"id":402,"result":{}}\n');
+    observer.endServerStream();
+
+    expect(events.map(({ name, outcome }) => ({ name, outcome }))).toEqual([
+      { name: 'before', outcome: 'success' },
+      { name: 'after', outcome: 'success' },
+    ]);
+  });
+
+  it('correlates success and error responses containing long nested result keys', () => {
+    const { observer, events } = fixture();
+    const longKey = 'r'.repeat(80);
+    observer.observeClientChunk(
+      '{"id":501,"method":"tools/call","params":{"name":"success"}}\n' +
+      '{"id":502,"method":"tools/call","params":{"name":"failure"}}\n',
+    );
+    observer.endClientStream();
+    observer.observeServerChunk(
+      `{"result":{"payload":{"${longKey}":"ignored"}},"id":501}\n`,
+    );
+    observer.observeServerChunk(
+      `{"id":502,"error":{"code":-1,"${longKey}":{"value":"ignored"}}}\n`,
+    );
+    observer.endServerStream();
+
+    expect(events.map(({ name, outcome }) => ({ name, outcome }))).toEqual([
+      { name: 'success', outcome: 'success' },
+      { name: 'failure', outcome: 'failure' },
+    ]);
+  });
+
   it('ignores malformed, notification, non-tool, unmatched, and invalid-name messages', () => {
     const { observer, events } = fixture();
 

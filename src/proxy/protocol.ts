@@ -353,8 +353,9 @@ class JsonRpcTokenExtractor {
   ): MetadataTarget | undefined {
     const location = messagePath(path);
     if (location === undefined) return undefined;
-    const relative = location.relative.join('.');
-    if (relative === 'id') {
+    const relative = location.relative;
+    if (relative.some((part) => typeof part !== 'string')) return undefined;
+    if (relative.length === 1 && relative[0] === 'id') {
       return {
         messageKey: location.key,
         field: 'id',
@@ -364,14 +365,18 @@ class JsonRpcTokenExtractor {
       };
     }
     if (kind !== 'string') return undefined;
-    if (relative === 'method') {
+    if (relative.length === 1 && relative[0] === 'method') {
       return {
         messageKey: location.key,
         field: 'method',
         limit: MAX_MCP_METHOD_BYTES,
       };
     }
-    if (relative === 'params.name') {
+    if (
+      relative.length === 2 &&
+      relative[0] === 'params' &&
+      relative[1] === 'name'
+    ) {
       return {
         messageKey: location.key,
         field: 'name',
