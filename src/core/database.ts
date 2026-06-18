@@ -3,6 +3,37 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 const SUPPORTED_SCHEMA_VERSION = 1;
+const INITIALIZATION_RETRY_MS = 1_000;
+const retryWait = new Int32Array(new SharedArrayBuffer(4));
+
+function isDatabaseBusy(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'errcode' in error &&
+    error.errcode === 5
+  );
+}
+
+function withInitializationRetry(action: () => void): void {
+  const deadline = Date.now() + INITIALIZATION_RETRY_MS;
+  let delay = 5;
+
+  while (true) {
+    try {
+      action();
+      return;
+    } catch (error) {
+      const remaining = deadline - Date.now();
+      if (!isDatabaseBusy(error) || remaining <= 0) {
+        throw error;
+      }
+
+      Atomics.wait(retryWait, 0, 0, Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 50);
+    }
+  }
+}
 
 function schemaVersion(database: DatabaseSync): number {
   const row = database.prepare('PRAGMA user_version').get() as
@@ -26,14 +57,14 @@ function migrateToVersionOne(database: DatabaseSync): void {
       skill_id TEXT,
       mcp_server TEXT,
       outcome TEXT NOT NULL,
-      duration_ms INTEGER,
+      duration_ms REAL,
       evidence TEXT NOT NULL,
       precision TEXT NOT NULL,
       dedupe_key TEXT NOT NULL UNIQUE
     );
-    CREATE INDEX usage_events_occurred_at_idx
+    CREATE INDEX usage_events_time
       ON usage_events (occurred_at);
-    CREATE INDEX usage_events_agent_kind_idx
+    CREATE INDEX usage_events_agent_kind
       ON usage_events (agent, kind);
     PRAGMA user_version = 1;
   `);
@@ -46,7 +77,13 @@ function applyMigrations(database: DatabaseSync, currentVersion: number): void {
 
   database.exec('BEGIN IMMEDIATE');
   try {
-    if (currentVersion === 0) {
+    const lockedVersion = schemaVersion(database);
+    if (lockedVersion > SUPPORTED_SCHEMA_VERSION) {
+      throw new Error(
+        `Usage database schema ${lockedVersion} is newer than supported schema ${SUPPORTED_SCHEMA_VERSION}`,
+      );
+    }
+    if (lockedVersion === 0) {
       migrateToVersionOne(database);
     }
     database.exec('COMMIT');
@@ -61,11 +98,11 @@ export function openUsageDatabase(file: string): DatabaseSync {
   const database = new DatabaseSync(file);
 
   try {
-    database.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 1000;
-      PRAGMA foreign_keys = ON;
-    `);
+    database.exec('PRAGMA busy_timeout = 1000');
+    withInitializationRetry(() => {
+      database.exec('PRAGMA journal_mode = WAL');
+    });
+    database.exec('PRAGMA foreign_keys = ON');
 
     const currentVersion = schemaVersion(database);
     if (currentVersion > SUPPORTED_SCHEMA_VERSION) {
@@ -74,7 +111,9 @@ export function openUsageDatabase(file: string): DatabaseSync {
       );
     }
 
-    applyMigrations(database, currentVersion);
+    withInitializationRetry(() => {
+      applyMigrations(database, currentVersion);
+    });
     return database;
   } catch (error) {
     database.close();

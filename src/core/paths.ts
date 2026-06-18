@@ -17,6 +17,6 @@ export function usagePaths(
     root,
     database: join(root, 'usage.db'),
     state,
-    errors: join(state, 'errors.log'),
+    errors: join(root, 'logs', 'errors.log'),
   };
 }

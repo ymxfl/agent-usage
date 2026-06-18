@@ -1,9 +1,10 @@
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { Worker } from 'node:worker_threads';
+import { pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -21,53 +22,80 @@ async function temporaryDirectory(): Promise<string> {
 }
 
 async function runConcurrentWriter(file: string, prefix: string): Promise<void> {
-  const worker = new Worker(
-    `
-      const { DatabaseSync } = require('node:sqlite');
-      const { parentPort, workerData } = require('node:worker_threads');
-
-      const database = new DatabaseSync(workerData.file);
-      database.exec('PRAGMA busy_timeout = 1000');
-      const insert = database.prepare(\`
-        INSERT INTO usage_events (
-          schema_version, occurred_at, agent, kind, name, skill_id,
-          outcome, evidence, precision, dedupe_key
-        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      \`);
+  const databaseModule = pathToFileURL(
+    join(process.cwd(), 'src', 'core', 'database.ts'),
+  ).href;
+  const repositoryModule = pathToFileURL(
+    join(process.cwd(), 'src', 'core', 'repository.ts'),
+  ).href;
+  const child = spawn(
+    process.execPath,
+    [
+      '--experimental-strip-types',
+      '--input-type=module',
+      '--eval',
+      `
+      const { openUsageDatabase } = await import(process.env.DATABASE_MODULE);
+      const { UsageRepository } = await import(process.env.REPOSITORY_MODULE);
+      const database = openUsageDatabase(process.env.DATABASE_FILE);
+      const repository = new UsageRepository(database);
 
       for (let index = 0; index < 25; index += 1) {
-        insert.run(
-          '2026-06-18T09:30:00.000Z',
-          'codex',
-          'skill_invocation',
-          'test-driven-development',
-          'codex:project:0123456789abcdef',
-          'success',
-          'native_hook',
-          'exact',
-          \`\${workerData.prefix}:\${index}\`,
-        );
+        repository.insert({
+          schemaVersion: 1,
+          occurredAt: '2026-06-18T09:30:00.000Z',
+          agent: 'codex',
+          kind: 'skill_invocation',
+          name: 'test-driven-development',
+          skillId: 'codex:project:0123456789abcdef',
+          outcome: 'success',
+          evidence: 'native_hook',
+          precision: 'exact',
+          dedupeKey: \`\${process.env.WRITER_PREFIX}:\${index}\`,
+        });
       }
 
       database.close();
-      parentPort.postMessage('done');
     `,
-    { eval: true, workerData: { file, prefix } },
+    ],
+    {
+      env: {
+        ...process.env,
+        DATABASE_FILE: file,
+        DATABASE_MODULE: databaseModule,
+        REPOSITORY_MODULE: repositoryModule,
+        WRITER_PREFIX: prefix,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
   );
 
   await new Promise<void>((resolve, reject) => {
+    let stderr = '';
     const timeout = setTimeout(() => {
-      void worker.terminate();
+      child.kill();
       reject(new Error(`Concurrent SQLite writer ${prefix} timed out`));
-    }, 5_000);
+    }, 10_000);
 
-    worker.once('error', (error) => {
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.once('error', (error) => {
       clearTimeout(timeout);
       reject(error);
     });
-    worker.once('message', () => {
+    child.once('exit', (code) => {
       clearTimeout(timeout);
-      resolve();
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Concurrent SQLite writer ${prefix} exited ${code}: ${stderr}`,
+          ),
+        );
+      }
     });
   });
 }
@@ -103,7 +131,7 @@ const eventVariants: UsageEvent[] = [
     skillId: 'codex:project:0123456789abcdef',
     sessionId: 'session-123',
     project: 'agent-usage',
-    durationMs: 42,
+    durationMs: 42.5,
     mcpServer: 'injected-skill-tracker',
     evidence: 'injected_mcp',
     precision: 'best_effort',
@@ -125,7 +153,7 @@ describe('usagePaths', () => {
       root: '/tmp/custom-agent-usage',
       database: '/tmp/custom-agent-usage/usage.db',
       state: '/tmp/custom-agent-usage/state',
-      errors: '/tmp/custom-agent-usage/state/errors.log',
+      errors: '/tmp/custom-agent-usage/logs/errors.log',
     });
   });
 
@@ -138,7 +166,7 @@ describe('usagePaths', () => {
         root: '/tmp/environment-agent-usage',
         database: '/tmp/environment-agent-usage/usage.db',
         state: '/tmp/environment-agent-usage/state',
-        errors: '/tmp/environment-agent-usage/state/errors.log',
+        errors: '/tmp/environment-agent-usage/logs/errors.log',
       });
 
       delete process.env.AGENT_USAGE_HOME;
@@ -146,7 +174,7 @@ describe('usagePaths', () => {
         root: join(homedir(), '.agent-usage'),
         database: join(homedir(), '.agent-usage', 'usage.db'),
         state: join(homedir(), '.agent-usage', 'state'),
-        errors: join(homedir(), '.agent-usage', 'state', 'errors.log'),
+        errors: join(homedir(), '.agent-usage', 'logs', 'errors.log'),
       });
     } finally {
       if (previous === undefined) {
@@ -190,10 +218,11 @@ describe('openUsageDatabase', () => {
 
     try {
       const columns = database
-        .prepare("SELECT name FROM pragma_table_info('usage_events') ORDER BY cid")
-        .all()
-        .map(({ name }) => name);
-      expect(columns).toEqual([
+        .prepare(
+          "SELECT name, type FROM pragma_table_info('usage_events') ORDER BY cid",
+        )
+        .all() as Array<{ name: string; type: string }>;
+      expect(columns.map(({ name }) => name)).toEqual([
         'id',
         'schema_version',
         'occurred_at',
@@ -210,19 +239,21 @@ describe('openUsageDatabase', () => {
         'precision',
         'dedupe_key',
       ]);
+      expect(columns.find(({ name }) => name === 'duration_ms')?.type).toBe(
+        'REAL',
+      );
 
       const indexes = database
         .prepare(
-          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'usage_events'",
+          `SELECT name FROM sqlite_master
+           WHERE type = 'index'
+             AND tbl_name = 'usage_events'
+             AND name NOT LIKE 'sqlite_autoindex%'
+           ORDER BY name`,
         )
         .all()
         .map(({ name }) => name);
-      expect(indexes).toEqual(
-        expect.arrayContaining([
-          'usage_events_occurred_at_idx',
-          'usage_events_agent_kind_idx',
-        ]),
-      );
+      expect(indexes).toEqual(['usage_events_agent_kind', 'usage_events_time']);
     } finally {
       database.close();
     }
@@ -316,14 +347,14 @@ describe('UsageRepository', () => {
   it('allows two WAL connections to write without corruption', async () => {
     const root = await temporaryDirectory();
     const file = join(root, 'usage.db');
+
+    await Promise.all([
+      runConcurrentWriter(file, 'first'),
+      runConcurrentWriter(file, 'second'),
+    ]);
+
     const database = openUsageDatabase(file);
-
     try {
-      await Promise.all([
-        runConcurrentWriter(file, 'first'),
-        runConcurrentWriter(file, 'second'),
-      ]);
-
       expect(new UsageRepository(database).count()).toBe(50);
       expect(database.prepare('PRAGMA integrity_check').get()).toEqual({
         integrity_check: 'ok',
