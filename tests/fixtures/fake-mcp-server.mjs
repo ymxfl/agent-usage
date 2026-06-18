@@ -6,6 +6,8 @@ if (mode === 'echo') {
   process.stdin.pipe(process.stdout);
 } else if (mode === 'burst') {
   process.stdout.write(Buffer.alloc(512 * 1024, 0x78));
+} else if (mode === 'single') {
+  process.stdout.write('single final chunk');
 } else {
   let pending = Buffer.alloc(0);
 

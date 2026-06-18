@@ -5,7 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 import type { UsageEvent } from '../../src/core/event.js';
 import { McpProtocolObserver } from '../../src/proxy/protocol.js';
-import { runStdioProxy } from '../../src/proxy/stdio-proxy.js';
+import {
+  MAX_OBSERVABLE_FRAME_BYTES,
+  runStdioProxy,
+} from '../../src/proxy/stdio-proxy.js';
 
 const fakeServer = fileURLToPath(
   new URL('../fixtures/fake-mcp-server.mjs', import.meta.url),
@@ -90,6 +93,29 @@ class GatedWritable extends Writable {
   }
 }
 
+class FailingWritable extends Writable {
+  readonly failure: Error;
+
+  constructor(message: string) {
+    super();
+    this.failure = new Error(message);
+  }
+
+  override _write(
+    _chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    callback(this.failure);
+  }
+}
+
+function signalListenerCounts(): number[] {
+  return (['SIGINT', 'SIGTERM', 'SIGHUP'] as const).map(
+    (signal) => process.listenerCount(signal),
+  );
+}
+
 describe('runStdioProxy', () => {
   it('relays stdin and stdout byte-for-byte and relays stderr', async () => {
     const fixture = proxyFixture('echo');
@@ -142,6 +168,118 @@ describe('runStdioProxy', () => {
     expect(writesWhileBlocked).toBe(1);
     expect(Buffer.concat(output.chunks)).toEqual(Buffer.alloc(512 * 1024, 0x78));
     error.destroy();
+  });
+
+  it('waits for final stdout and stderr writes to flush after the child exits', async () => {
+    const input = new PassThrough();
+    const output = new GatedWritable();
+    const error = new GatedWritable();
+    let completed = false;
+    const completion = runStdioProxy(
+      process.execPath,
+      [fakeServer, 'single'],
+      new CountingObserver(),
+      { input, output, error },
+    ).then((result) => {
+      completed = true;
+      return result;
+    });
+    input.end();
+
+    await Promise.all([output.firstWrite, error.firstWrite]);
+    const completionWhileWritesBlocked = await Promise.race([
+      completion.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+    ]);
+    output.release();
+    error.release();
+
+    await expect(completion).resolves.toEqual({ code: 0, signal: null });
+    expect(completionWhileWritesBlocked).toBe(false);
+    expect(completed).toBe(true);
+    expect(Buffer.concat(output.chunks).toString()).toBe('single final chunk');
+    expect(Buffer.concat(error.chunks).toString()).toBe('fake MCP diagnostic\n');
+  });
+
+  it('rejects input stream failures, terminates the child, and cleans up once', async () => {
+    const listenersBefore = signalListenerCounts();
+    const observer = new CountingObserver();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const error = new PassThrough();
+    const failure = new Error('input failed');
+    const completion = runStdioProxy(
+      process.execPath,
+      [fakeServer, 'single'],
+      observer,
+      { input, output, error },
+    );
+
+    input.destroy(failure);
+
+    await expect(completion).rejects.toBe(failure);
+    expect(observer.closeCount).toBe(1);
+    expect(signalListenerCounts()).toEqual(listenersBefore);
+    output.destroy();
+    error.destroy();
+  });
+
+  it('rejects stdout destination failures without an uncaught stream error', async () => {
+    const listenersBefore = signalListenerCounts();
+    const observer = new CountingObserver();
+    const input = new PassThrough();
+    const output = new FailingWritable('stdout destination failed');
+    const error = new PassThrough();
+    const completion = runStdioProxy(
+      process.execPath,
+      [fakeServer, 'single'],
+      observer,
+      { input, output, error },
+    );
+    input.end();
+
+    await expect(completion).rejects.toBe(output.failure);
+    expect(observer.closeCount).toBe(1);
+    expect(signalListenerCounts()).toEqual(listenersBefore);
+    error.destroy();
+  });
+
+  it('rejects stderr destination failures without an uncaught stream error', async () => {
+    const listenersBefore = signalListenerCounts();
+    const observer = new CountingObserver();
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const error = new FailingWritable('stderr destination failed');
+    const completion = runStdioProxy(
+      process.execPath,
+      [fakeServer, 'single'],
+      observer,
+      { input, output, error },
+    );
+    input.end();
+
+    await expect(completion).rejects.toBe(error.failure);
+    expect(observer.closeCount).toBe(1);
+    expect(signalListenerCounts()).toEqual(listenersBefore);
+    output.destroy();
+  });
+
+  it('skips oversized observation frames while relaying every byte unchanged', async () => {
+    const observer = new CountingObserver();
+    const fixture = proxyFixture('echo', observer);
+    const oversized = Buffer.alloc(MAX_OBSERVABLE_FRAME_BYTES + 1, 0x78);
+    const suffix = Buffer.from('\nsmall\n');
+    const expected = Buffer.concat([oversized, suffix]);
+
+    for (let offset = 0; offset < oversized.length; offset += 32 * 1024) {
+      fixture.input.write(oversized.subarray(offset, offset + (32 * 1024)));
+    }
+    fixture.input.end(suffix);
+
+    await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
+    await expect(fixture.outputDone).resolves.toEqual(expected);
+    expect(observer.clientLines).toEqual(['small']);
+    expect(observer.serverLines).toEqual(['small']);
   });
 
   it('observes success, error, batches, odd whitespace, and a final partial frame', async () => {
