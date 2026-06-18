@@ -57,7 +57,7 @@ function sqlFilter(filter: QueryFilter): SqlFilter {
 
   if (filter.since !== undefined) {
     predicates.push('occurred_at >= ?');
-    parameters.push(filter.since);
+    parameters.push(new Date(filter.since).toISOString());
   }
   if (filter.agent !== undefined) {
     predicates.push('agent = ?');

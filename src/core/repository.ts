@@ -40,7 +40,7 @@ export class UsageRepository {
   insert(event: UsageEvent): boolean {
     const result = this.#insertStatement.run(
       event.schemaVersion,
-      event.occurredAt,
+      new Date(event.occurredAt).toISOString(),
       event.agent,
       event.sessionId ?? null,
       event.project ?? null,

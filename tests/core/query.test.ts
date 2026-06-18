@@ -159,6 +159,49 @@ describe('UsageRepository.report', () => {
     }
   });
 
+  it('includes an event at the same instant across fractional timestamp precision', async () => {
+    const fixture = await repositoryFixture();
+
+    try {
+      fixture.repository.insert(usageEvent({
+        occurredAt: '2026-06-18T09:30:00.10Z',
+      }));
+
+      const report = fixture.repository.report(
+        { since: '2026-06-18T09:30:00.1Z' },
+        'custom',
+      );
+
+      expect(report.totals).toEqual([
+        expect.objectContaining({ count: 1 }),
+      ]);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('canonicalizes offset since filters and rejects invalid timestamps', async () => {
+    const fixture = await repositoryFixture();
+
+    try {
+      fixture.repository.insert(usageEvent({
+        occurredAt: '2026-06-18T09:30:00.000Z',
+      }));
+
+      expect(
+        fixture.repository.report(
+          { since: '2026-06-18T10:30:00+01:00' },
+          'custom',
+        ).totals,
+      ).toEqual([expect.objectContaining({ count: 1 })]);
+      expect(() =>
+        fixture.repository.report({ since: 'not-an-instant' }, 'custom'),
+      ).toThrow(RangeError);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it('parameterizes SQL-like agent filters', async () => {
     const fixture = await repositoryFixture();
 

@@ -280,6 +280,29 @@ describe('openUsageDatabase', () => {
 });
 
 describe('UsageRepository', () => {
+  it('canonicalizes accepted event timestamps at the storage boundary', async () => {
+    const root = await temporaryDirectory();
+    const database = openUsageDatabase(join(root, 'usage.db'));
+    const repository = new UsageRepository(database);
+
+    try {
+      repository.insert({
+        ...baseEvent,
+        occurredAt: '2026-06-18T09:30:00.10Z',
+        kind: 'skill_invocation',
+        skillId: 'codex:project:0123456789abcdef',
+      });
+
+      expect(
+        database
+          .prepare('SELECT occurred_at AS occurredAt FROM usage_events')
+          .get(),
+      ).toEqual({ occurredAt: '2026-06-18T09:30:00.100Z' });
+    } finally {
+      database.close();
+    }
+  });
+
   it.each(eventVariants)('inserts and roundtrips a $kind event', async (event) => {
     const root = await temporaryDirectory();
     const database = openUsageDatabase(join(root, 'usage.db'));
