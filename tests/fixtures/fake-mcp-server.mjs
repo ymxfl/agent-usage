@@ -4,6 +4,8 @@ process.stderr.write('fake MCP diagnostic\n');
 
 if (mode === 'echo') {
   process.stdin.pipe(process.stdout);
+} else if (mode === 'burst') {
+  process.stdout.write(Buffer.alloc(512 * 1024, 0x78));
 } else {
   let pending = Buffer.alloc(0);
 
@@ -51,6 +53,11 @@ if (mode === 'echo') {
     try {
       parsed = JSON.parse(line);
     } catch {
+      return;
+    }
+
+    if (!Array.isArray(parsed) && parsed?.method?.startsWith('notifications/')) {
+      process.stdout.write(`${line}\n`);
       return;
     }
 

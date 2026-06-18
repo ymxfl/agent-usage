@@ -1,4 +1,4 @@
-import { PassThrough } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
@@ -58,6 +58,38 @@ class CountingObserver {
   }
 }
 
+class GatedWritable extends Writable {
+  readonly chunks: Buffer[] = [];
+  readonly firstWrite: Promise<void>;
+  #notifyFirstWrite!: () => void;
+  #releaseFirstWrite: (() => void) | undefined;
+
+  constructor() {
+    super({ highWaterMark: 1 });
+    this.firstWrite = new Promise((resolve) => {
+      this.#notifyFirstWrite = resolve;
+    });
+  }
+
+  release(): void {
+    this.#releaseFirstWrite?.();
+  }
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    if (this.#releaseFirstWrite === undefined) {
+      this.#releaseFirstWrite = callback;
+      this.#notifyFirstWrite();
+      return;
+    }
+    callback();
+  }
+}
+
 describe('runStdioProxy', () => {
   it('relays stdin and stdout byte-for-byte and relays stderr', async () => {
     const fixture = proxyFixture('echo');
@@ -79,6 +111,37 @@ describe('runStdioProxy', () => {
       'final partial',
     ]);
     expect((fixture.observer as CountingObserver).closeCount).toBe(1);
+  });
+
+  it('honors slow-output backpressure before completing without losing bytes', async () => {
+    const input = new PassThrough();
+    const output = new GatedWritable();
+    const error = new PassThrough();
+    let completed = false;
+    const completion = runStdioProxy(
+      process.execPath,
+      [fakeServer, 'burst'],
+      new CountingObserver(),
+      { input, output, error },
+    ).then((result) => {
+      completed = true;
+      return result;
+    });
+    input.end();
+
+    await output.firstWrite;
+    await new Promise((resolve) => setImmediate(resolve));
+    const completedWhileBlocked = completed;
+    const neededDrainWhileBlocked = output.writableNeedDrain;
+    const writesWhileBlocked = output.chunks.length;
+
+    output.release();
+    await expect(completion).resolves.toEqual({ code: 0, signal: null });
+    expect(completedWhileBlocked).toBe(false);
+    expect(neededDrainWhileBlocked).toBe(true);
+    expect(writesWhileBlocked).toBe(1);
+    expect(Buffer.concat(output.chunks)).toEqual(Buffer.alloc(512 * 1024, 0x78));
+    error.destroy();
   });
 
   it('observes success, error, batches, odd whitespace, and a final partial frame', async () => {
@@ -124,14 +187,46 @@ describe('runStdioProxy', () => {
     expect(response.result).toEqual({ cwd, env: 'visible' });
   });
 
-  it('returns a nonzero crash exit and closes the observer once', async () => {
-    const observer = new CountingObserver();
+  it('records one unknown call when the real MCP server crashes before answering', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'crash-connection',
+      (event) => events.push(event),
+    );
     const fixture = proxyFixture('protocol', observer);
     fixture.input.end('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"crash"}}\n');
 
     await expect(fixture.completion).resolves.toEqual({ code: 7, signal: null });
     expect((await fixture.errorDone).toString()).toContain('fake MCP crash');
-    expect(observer.closeCount).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'mcp_call',
+      name: 'crash',
+      outcome: 'unknown',
+      mcpServer: 'fake',
+    });
+  });
+
+  it('relays a JSON-RPC notification byte-for-byte without recording usage', async () => {
+    const events: UsageEvent[] = [];
+    const observer = new McpProtocolObserver(
+      'codex',
+      'fake',
+      'notification-connection',
+      (event) => events.push(event),
+    );
+    const fixture = proxyFixture('protocol', observer);
+    const notification = Buffer.from(
+      ' { "jsonrpc": "2.0", "method": "notifications/progress", "params": { "token": 7 } } \r\n',
+    );
+
+    fixture.input.end(notification);
+
+    await expect(fixture.completion).resolves.toEqual({ code: 0, signal: null });
+    await expect(fixture.outputDone).resolves.toEqual(notification);
+    expect(events).toEqual([]);
   });
 
   it('forwards termination signals and reports the child signal', async () => {
