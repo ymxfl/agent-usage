@@ -169,7 +169,7 @@ Adding an Agent requires a new adapter, strategy selection, configuration fixtur
 
 ## Claude Code Adapter
 
-Claude Code is installed as a user-level plugin containing hooks and the `/usage-stats` Skill.
+Claude Code is installed as a user-level skills-directory plugin containing hooks and the accounting MCP server. Because plugin Skills are namespaced, the installer also writes a thin plain user Skill at `~/.claude/skills/usage-stats/SKILL.md` so the public command remains exactly `/usage-stats`; that alias delegates to the plugin-provided `query_usage` MCP tool.
 
 The adapter uses:
 
@@ -181,7 +181,7 @@ Native hook events supply session identifiers, tool-use identifiers, outcomes, a
 
 Claude Code enterprise settings may reject user hooks. `health` detects this condition and reports degraded coverage rather than claiming installation success.
 
-No Skill files are modified for Claude Code. Newly installed Skills are covered automatically by the native hook matchers.
+No existing user Skill files are modified for Claude Code. The only plain Skill written is the installer-owned `/usage-stats` alias. Newly installed Skills are covered automatically by the native hook matchers.
 
 ## JoyCode Adapter
 
@@ -257,6 +257,8 @@ agent-usage uninstall <agent>
 ```
 
 `sync` instruments newly discovered Skills and wraps newly added stdio MCP servers. `repair` compares current configuration with the manifest and safely restores missing managed entries. `uninstall` removes managed blocks and entries while preserving unrelated user configuration.
+
+Usage events are retained indefinitely in the first release. Adapter uninstall preserves `~/.agent-usage/usage.db` by default so removing one Agent does not erase another Agent's history. `uninstall --purge-data` removes the shared database only after every installed adapter has been removed and the user explicitly confirms the destructive operation; `--yes` is required in non-interactive use.
 
 Conflicting user edits are never overwritten silently. The operation reports the conflict and leaves the file unchanged unless it can remove or update only the exact managed fragment.
 
