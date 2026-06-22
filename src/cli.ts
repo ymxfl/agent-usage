@@ -30,10 +30,14 @@ import {
 } from './core/query.js';
 import { UsageRepository } from './core/repository.js';
 import {
+  emptyAgentSelection,
+  loadSelectionConfig,
   matchSelectionPattern,
+  selectedMcp,
   selectedSkillMode,
   skillModes,
   type AgentSelectionPolicy,
+  type SelectionConfig,
   type SkillMode,
 } from './core/selection.js';
 import { runUsageMcpServer } from './mcp/server.js';
@@ -63,6 +67,7 @@ export interface CliRepository extends UsageMcpRepository {
 
 export interface CliRuntime {
   paths(): UsagePaths;
+  loadSelectionConfig(path: string): Promise<SelectionConfig>;
   openDatabase(path: string): CliDatabase;
   createRepository(database: CliDatabase): CliRepository;
   runMcpServer(service: UsageMcpService): Promise<void>;
@@ -96,6 +101,7 @@ const scopes = ['user', 'project'] as const;
 function defaultRuntime(): CliRuntime {
   return {
     paths: usagePaths,
+    loadSelectionConfig,
     openDatabase: openUsageDatabase,
     createRepository: (database) =>
       new UsageRepository(database as DatabaseSync),
@@ -427,32 +433,59 @@ function logTelemetryError(
   }
 }
 
-function initializeProxyTelemetry(
+const noopProtocolObserver: StdioProtocolObserver = {
+  observeClientChunk: () => {},
+  observeServerChunk: () => {},
+  endClientStream: () => {},
+  endServerStream: () => {},
+  close: () => {},
+};
+
+async function initializeProxyTelemetry(
   runtime: CliRuntime,
   agent: string,
   server: string,
-): { database: CliDatabase | undefined; observer: McpProtocolObserver } {
+): Promise<{
+  database: CliDatabase | undefined;
+  observer: StdioProtocolObserver;
+}> {
   let database: CliDatabase | undefined;
-  let emit: (event: UsageEvent) => unknown = () => false;
 
   try {
-    database = runtime.openDatabase(runtime.paths().database);
+    const paths = runtime.paths();
+    const config = await runtime.loadSelectionConfig(paths.config);
+    const policy = config.agents[agent] ?? emptyAgentSelection();
+    if (policy.mcp.length === 0) {
+      return { database: undefined, observer: noopProtocolObserver };
+    }
+
+    database = runtime.openDatabase(paths.database);
     const repository = runtime.createRepository(database);
-    emit = (event) => repository.insert(event);
+    const emit = (event: UsageEvent): unknown => {
+      if (
+        event.kind !== 'mcp_call' ||
+        event.mcpServer === undefined ||
+        !selectedMcp(policy, event.mcpServer, event.name)
+      ) {
+        return false;
+      }
+      return repository.insert(event);
+    };
+    return {
+      database,
+      observer: new McpProtocolObserver(
+        agent,
+        server,
+        runtime.randomId(),
+        emit,
+        runtime.logger,
+      ),
+    };
   } catch (error) {
     logTelemetryError(runtime, 'Failed to initialize proxy telemetry', error);
   }
 
-  return {
-    database,
-    observer: new McpProtocolObserver(
-      agent,
-      server,
-      runtime.randomId(),
-      emit,
-      runtime.logger,
-    ),
-  };
+  return { database, observer: noopProtocolObserver };
 }
 
 function closeProxyTelemetry(
@@ -630,7 +663,7 @@ export function createProgram(
           program.error('missing server command');
           return;
         }
-        const telemetry = initializeProxyTelemetry(
+        const telemetry = await initializeProxyTelemetry(
           runtime,
           options.agent,
           options.server,

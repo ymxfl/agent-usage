@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { Readable, Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,7 +19,10 @@ import type {
 import { createProgram, runCli, type CliRuntime } from '../src/cli.js';
 import { openUsageDatabase } from '../src/core/database.js';
 import { UsageRepository } from '../src/core/repository.js';
-import type { AgentSelectionPolicy } from '../src/core/selection.js';
+import type {
+  AgentSelectionPolicy,
+  SelectionConfig,
+} from '../src/core/selection.js';
 import type { UsageMcpService } from '../src/mcp/service.js';
 import type {
   StdioProtocolObserver,
@@ -28,6 +32,9 @@ import { runStdioProxy } from '../src/proxy/stdio-proxy.js';
 import { usageEvent } from './helpers/usage-fixtures.js';
 
 const tempDirectories: string[] = [];
+const fakeMcpServer = fileURLToPath(
+  new URL('./fixtures/fake-mcp-server.mjs', import.meta.url),
+);
 
 afterEach(() => {
   for (const directory of tempDirectories.splice(0)) {
@@ -144,6 +151,19 @@ function runtimeFixture(
       setExitCode: (code) => exitCodes.push(code),
       ...overrides,
     },
+  };
+}
+
+function selectionConfig(
+  agents: SelectionConfig['agents'] = {},
+): SelectionConfig {
+  return { version: 1, agents };
+}
+
+function mcpSelection(...mcp: string[]): AgentSelectionPolicy {
+  return {
+    skills: { native_hook: [], injected_mcp: [] },
+    mcp,
   };
 }
 
@@ -799,6 +819,209 @@ describe('mcp and proxy', () => {
     expect(fixture.exitCodes).toEqual([23]);
   });
 
+  it.each([
+    ['missing', undefined],
+    ['empty', async () => selectionConfig()],
+  ] as const)(
+    '%s policy launches the proxy without opening telemetry storage',
+    async (_case, loadSelectionConfig) => {
+      const openDatabase = vi.fn<CliRuntime['openDatabase']>(() => ({
+        close: vi.fn(),
+      }));
+      const insert = vi.fn();
+      const runProxy = vi.fn<CliRuntime['runProxy']>(async (
+        _command,
+        _args,
+        observer,
+      ) => {
+        observer.observeClientChunk(
+          '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}\n',
+        );
+        observer.observeServerChunk(
+          '{"jsonrpc":"2.0","id":1,"result":{}}\n',
+        );
+        return { code: 0, signal: null };
+      });
+      const fixture = runtimeFixture({
+        openDatabase,
+        createRepository: () => ({ insert, report: vi.fn() }),
+        runProxy,
+        ...(loadSelectionConfig === undefined ? {} : { loadSelectionConfig }),
+      });
+
+      await parse(
+        new AdapterRegistry(),
+        fixture.runtime,
+        ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+      );
+
+      expect(runProxy).toHaveBeenCalledOnce();
+      expect(openDatabase).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+    },
+  );
+
+  it('records only a selected qualified tool while relaying both exchanges unchanged', async () => {
+    const requests = [
+      '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}\n',
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"write"}}\n',
+    ].join('');
+    const responses = [
+      '{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok"}]}}\n',
+      '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"ok"}]}}\n',
+    ].join('');
+    const output: string[] = [];
+    const insert = vi.fn();
+    const close = vi.fn();
+    const loadSelectionConfig = vi.fn(async () =>
+      selectionConfig({ codex: mcpSelection('github.search') })
+    );
+    const fixture = runtimeFixture({
+      loadSelectionConfig,
+      openDatabase: () => ({ close }),
+      createRepository: () => ({ insert, report: vi.fn() }),
+      runProxy: (command, args, observer, options) =>
+        runStdioProxy(command, args, observer, {
+          ...options,
+          input: Readable.from([requests]),
+          output: new Writable({
+            write(chunk, _encoding, callback) {
+              output.push(chunk.toString());
+              callback();
+            },
+          }),
+          error: new PassThrough(),
+        }),
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      [
+        'proxy',
+        '--agent',
+        'codex',
+        '--server',
+        'github',
+        '--',
+        process.execPath,
+        fakeMcpServer,
+        'protocol',
+      ],
+    );
+
+    expect(output.join('')).toBe(responses);
+    expect(loadSelectionConfig).toHaveBeenCalledOnce();
+    expect(loadSelectionConfig).toHaveBeenCalledWith(
+      join(fixture.root, 'config.json'),
+    );
+    expect(insert).toHaveBeenCalledOnce();
+    expect(insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: 'codex',
+        kind: 'mcp_call',
+        mcpServer: 'github',
+        name: 'search',
+        outcome: 'success',
+      }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('records every tool for a selected MCP server', async () => {
+    const insert = vi.fn();
+    let observer: StdioProtocolObserver | undefined;
+    const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ codex: mcpSelection('github') }),
+      createRepository: () => ({ insert, report: vi.fn() }),
+      runProxy: async (_command, _args, value) => {
+        observer = value;
+        return { code: 0, signal: null };
+      },
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+    );
+    for (const [id, name] of [[1, 'search'], [2, 'write']] as const) {
+      observer?.observeClientChunk(
+        `{"jsonrpc":"2.0","id":${id},"method":"tools/call","params":{"name":"${name}"}}\n`,
+      );
+      observer?.observeServerChunk(
+        `{"jsonrpc":"2.0","id":${id},"result":{}}\n`,
+      );
+    }
+
+    expect(insert.mock.calls.map(([event]) => event.name)).toEqual([
+      'search',
+      'write',
+    ]);
+  });
+
+  it('ignores policy belonging to another agent', async () => {
+    const openDatabase = vi.fn<CliRuntime['openDatabase']>(() => ({
+      close: vi.fn(),
+    }));
+    const runProxy = vi.fn<CliRuntime['runProxy']>(async () => ({
+      code: 0,
+      signal: null,
+    }));
+    const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ other: mcpSelection('github') }),
+      openDatabase,
+      runProxy,
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+    );
+
+    expect(runProxy).toHaveBeenCalledOnce();
+    expect(openDatabase).not.toHaveBeenCalled();
+  });
+
+  it.each(['path failure', 'malformed policy', 'read failure'])(
+    '%s logs and preserves the child exit',
+    async (failure) => {
+      const logger = { error: vi.fn() };
+      const openDatabase = vi.fn<CliRuntime['openDatabase']>(() => ({
+        close: vi.fn(),
+      }));
+      const fixture = runtimeFixture({
+        loadSelectionConfig: async () => {
+          throw new Error(failure);
+        },
+        openDatabase,
+        logger,
+        runProxy: async () => ({ code: 19, signal: null }),
+      });
+      if (failure === 'path failure') {
+        fixture.runtime.paths = () => {
+          throw new Error(failure);
+        };
+      }
+
+      await parse(
+        new AdapterRegistry(),
+        fixture.runtime,
+        ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+      );
+
+      expect(openDatabase).not.toHaveBeenCalled();
+      expect(fixture.exitCodes).toEqual([19]);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Failed to initialize proxy telemetry',
+        expect.objectContaining({ message: failure }),
+      );
+    },
+  );
+
   it('forwards child flags without an explicit option separator', async () => {
     const runProxy = vi.fn<CliRuntime['runProxy']>(async () => ({
       code: 0,
@@ -834,6 +1057,8 @@ describe('mcp and proxy', () => {
     const output: string[] = [];
     const logger = { error: vi.fn() };
     const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ codex: mcpSelection('docs') }),
       openDatabase: () => {
         throw new Error('storage unavailable');
       },
@@ -880,17 +1105,24 @@ describe('mcp and proxy', () => {
     );
   });
 
-  it.each(['paths', 'repository'] as const)(
+  it.each(['database', 'repository'] as const)(
     'still dispatches proxy when %s telemetry initialization fails',
     async (failure) => {
       const runProxy = vi.fn<CliRuntime['runProxy']>(async () => ({
         code: 0,
         signal: null,
       }));
-      const fixture = runtimeFixture({ runProxy, logger: { error: vi.fn() } });
-      if (failure === 'paths') {
-        fixture.runtime.paths = () => {
-          throw new Error('paths unavailable');
+      const close = vi.fn();
+      const fixture = runtimeFixture({
+        runProxy,
+        logger: { error: vi.fn() },
+        openDatabase: () => ({ close }),
+        loadSelectionConfig: async () =>
+          selectionConfig({ codex: mcpSelection('docs') }),
+      });
+      if (failure === 'database') {
+        fixture.runtime.openDatabase = () => {
+          throw new Error('database unavailable');
         };
       } else {
         fixture.runtime.createRepository = () => {
@@ -905,6 +1137,7 @@ describe('mcp and proxy', () => {
       );
 
       expect(runProxy).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledTimes(failure === 'repository' ? 1 : 0);
     },
   );
 
@@ -931,6 +1164,8 @@ describe('mcp and proxy', () => {
     });
     let observer: StdioProtocolObserver | undefined;
     const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ codex: mcpSelection('usage-stats') }),
       createRepository: () => ({
         insert,
         report: () => ({
@@ -967,6 +1202,72 @@ describe('mcp and proxy', () => {
     observer?.close();
 
     expect(insert).not.toHaveBeenCalled();
+  });
+
+  it('keeps the child successful when a selected insert and its logger fail', async () => {
+    const close = vi.fn();
+    const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ codex: mcpSelection('github.search') }),
+      openDatabase: () => ({ close }),
+      createRepository: () => ({
+        insert: () => {
+          throw new Error('insert failed');
+        },
+        report: vi.fn(),
+      }),
+      logger: {
+        error: () => {
+          throw new Error('logger failed');
+        },
+      },
+      runProxy: async (_command, _args, observer) => {
+        observer.observeClientChunk(
+          '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search"}}\n',
+        );
+        observer.observeServerChunk(
+          '{"jsonrpc":"2.0","id":1,"result":{}}\n',
+        );
+        return { code: 0, signal: null };
+      },
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+    );
+
+    expect(fixture.exitCodes).toEqual([]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the child exit when closing selected telemetry fails', async () => {
+    const logger = { error: vi.fn() };
+    const fixture = runtimeFixture({
+      loadSelectionConfig: async () =>
+        selectionConfig({ codex: mcpSelection('github') }),
+      openDatabase: () => ({
+        close: () => {
+          throw new Error('close failed');
+        },
+      }),
+      createRepository: () => ({ insert: vi.fn(), report: vi.fn() }),
+      logger,
+      runProxy: async () => ({ code: 17, signal: null }),
+    });
+
+    await parse(
+      new AdapterRegistry(),
+      fixture.runtime,
+      ['proxy', '--agent', 'codex', '--server', 'github', '--', 'server'],
+    );
+
+    expect(fixture.exitCodes).toEqual([17]);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Failed to close proxy telemetry',
+      expect.objectContaining({ message: 'close failed' }),
+    );
   });
 });
 
