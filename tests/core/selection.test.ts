@@ -1,6 +1,13 @@
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -190,6 +197,26 @@ describe('selection persistence', () => {
 
     await expect(saveSelectionConfig(path, invalid)).rejects.toThrow();
     await expect(readFile(path, 'utf8')).resolves.toBe(original);
+  });
+
+  it('preserves the destination and cleans the temp file when rename fails', async () => {
+    const path = await temporaryPath();
+    await mkdir(path);
+    const sentinel = join(path, 'sentinel');
+    await writeFile(sentinel, 'keep me');
+
+    await expect(
+      saveSelectionConfig(path, emptySelectionConfig()),
+    ).rejects.toThrow();
+
+    await expect(readFile(sentinel, 'utf8')).resolves.toBe('keep me');
+    const siblings = await readdir(dirname(path));
+    expect(siblings).toEqual(['config.json']);
+    expect(
+      siblings.filter(
+        (name) => name.startsWith('config.json.') && name.endsWith('.tmp'),
+      ),
+    ).toEqual([]);
   });
 
   it.runIf(process.platform !== 'win32')(
