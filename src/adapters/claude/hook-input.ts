@@ -17,13 +17,13 @@ export const claudeUserPromptExpansionSchema = claudeHookSchema.extend({
   expansion_type: z.enum(['slash_command', 'mcp_prompt']),
   command_name: nonemptyString,
   command_args: z.string(),
-  command_source: nonemptyString,
+  command_source: nonemptyString.optional(),
   prompt: nonemptyString,
 });
 
 const claudeToolHookShape = {
   tool_name: nonemptyString,
-  tool_input: z.record(z.string(), z.unknown()),
+  tool_input: z.unknown(),
   tool_use_id: nonemptyString,
   duration_ms: z.number().finite().nonnegative().optional(),
 };
@@ -45,7 +45,7 @@ export const claudePostToolUseSchema = claudeHookSchema
 export const claudePostToolUseFailureSchema = claudeHookSchema.extend({
   hook_event_name: z.literal('PostToolUseFailure'),
   ...claudeToolHookShape,
-  error: nonemptyString,
+  error: z.string(),
   is_interrupt: z.boolean().optional(),
 });
 

@@ -95,7 +95,6 @@ describe('normalizeClaudeHook skill events', () => {
     'expansion_type',
     'command_name',
     'command_args',
-    'command_source',
     'prompt',
   ])('requires UserPromptExpansion field %s', (field) => {
     const direct = fixture('direct-skill') as Record<string, unknown>;
@@ -118,7 +117,16 @@ describe('normalizeClaudeHook skill events', () => {
     ).toMatchObject({ name: 'release-review', outcome: 'unknown' });
   });
 
-  it('rejects empty required UserPromptExpansion identity fields', () => {
+  it('allows command_source to be omitted', () => {
+    const direct = fixture('direct-skill') as Record<string, unknown>;
+    const { command_source: _, ...withoutCommandSource } = direct;
+
+    expect(
+      normalizeClaudeHook(withoutCommandSource, deterministicDeps),
+    ).toMatchObject({ name: 'release-review', outcome: 'unknown' });
+  });
+
+  it('rejects empty nonempty UserPromptExpansion fields', () => {
     const direct = fixture('direct-skill') as Record<string, unknown>;
 
     expect(() =>
@@ -145,6 +153,7 @@ describe('normalizeClaudeHook skill events', () => {
 
   it('ignores unrelated tool hooks, including case variants of Skill', () => {
     const success = fixture('model-skill-success') as Record<string, unknown>;
+    const failure = fixture('model-skill-failure') as Record<string, unknown>;
 
     expect(
       normalizeClaudeHook(
@@ -155,6 +164,18 @@ describe('normalizeClaudeHook skill events', () => {
     expect(
       normalizeClaudeHook(
         { ...success, tool_name: 'skill' },
+        deterministicDeps,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeClaudeHook(
+        { ...success, tool_name: 'Read', tool_input: 'README.md' },
+        deterministicDeps,
+      ),
+    ).toBeNull();
+    expect(
+      normalizeClaudeHook(
+        { ...failure, tool_name: 'Read', tool_input: null },
         deterministicDeps,
       ),
     ).toBeNull();
@@ -209,9 +230,9 @@ describe('normalizeClaudeHook skill events', () => {
     expect(() =>
       normalizeClaudeHook(withoutError, deterministicDeps),
     ).toThrow();
-    expect(() =>
+    expect(
       normalizeClaudeHook({ ...failure, error: '' }, deterministicDeps),
-    ).toThrow();
+    ).toMatchObject({ outcome: 'failure' });
     expect(() =>
       normalizeClaudeHook(
         { ...failure, is_interrupt: 'false' },
