@@ -15,6 +15,7 @@ import { AdapterRegistry } from './adapters/registry.js';
 import type {
   AgentAdapter,
   Capabilities,
+  DiscoveredTargets,
   OperationResult,
   Scope,
 } from './adapters/types.js';
@@ -28,6 +29,12 @@ import {
   type UsageReport,
 } from './core/query.js';
 import { UsageRepository } from './core/repository.js';
+import {
+  selectedSkillMode,
+  skillModes,
+  type AgentSelectionPolicy,
+  type SkillMode,
+} from './core/selection.js';
 import { runUsageMcpServer } from './mcp/server.js';
 import {
   UsageMcpService,
@@ -167,6 +174,153 @@ function printCapabilities(
   for (const [name, supported] of Object.entries(capabilities)) {
     runtime.writeOutput(`  ${name}: ${supported ? 'yes' : 'no'}\n`);
   }
+}
+
+function compareText(left: string, right: string): number {
+  return left.localeCompare(right, 'en');
+}
+
+function targetSortKey(scope: Scope, name: string, detail: string): string {
+  return `${scope === 'user' ? '0' : '1'}\0${name}\0${detail}`;
+}
+
+function printTargets(
+  targets: DiscoveredTargets,
+  runtime: CliRuntime,
+): void {
+  runtime.writeOutput(`${targets.agent}\n`);
+  if (targets.skills.length === 0 && targets.mcp.length === 0) {
+    runtime.writeOutput('  No targets discovered.\n');
+  }
+
+  if (targets.skills.length === 0) {
+    runtime.writeOutput('  Skills: none\n');
+  } else {
+    runtime.writeOutput('  Skills:\n');
+    const skills = [...targets.skills].sort((left, right) =>
+      compareText(
+        targetSortKey(left.scope, left.name, left.path),
+        targetSortKey(right.scope, right.name, right.path),
+      )
+    );
+    for (const skill of skills) {
+      const modes = skill.supportedModes.length === 0
+        ? 'none'
+        : [...skill.supportedModes].sort(compareText).join(', ');
+      runtime.writeOutput(
+        `  - ${skill.name} [${skill.scope}] ${modes} (selected: ${skill.selectedMode ?? 'none'}) ${skill.path}\n`,
+      );
+    }
+  }
+
+  if (targets.mcp.length === 0) {
+    runtime.writeOutput('  MCP: none\n');
+  } else {
+    runtime.writeOutput('  MCP:\n');
+    const servers = [...targets.mcp].sort((left, right) =>
+      compareText(
+        targetSortKey(left.scope, left.server, left.transport),
+        targetSortKey(right.scope, right.server, right.transport),
+      )
+    );
+    for (const server of servers) {
+      runtime.writeOutput(
+        `  - ${server.server} [${server.scope}] ${server.transport} (selected: ${server.selected === true ? 'yes' : 'no'})\n`,
+      );
+    }
+  }
+
+  if (targets.unresolved.length === 0) {
+    runtime.writeOutput('  Unresolved patterns: none\n');
+  } else {
+    runtime.writeOutput('  Unresolved patterns:\n');
+    for (const pattern of [...targets.unresolved].sort(compareText)) {
+      runtime.writeOutput(`  - ${pattern}\n`);
+    }
+  }
+
+  if (targets.issues.length === 0) {
+    runtime.writeOutput('  Issues: none\n');
+  } else {
+    runtime.writeOutput('  Issues:\n');
+    for (const issue of [...targets.issues].sort(compareText)) {
+      runtime.writeOutput(`  - ${issue}\n`);
+    }
+  }
+}
+
+function printSelectionPolicy(
+  policy: AgentSelectionPolicy,
+  runtime: CliRuntime,
+): void {
+  const display = (patterns: string[]): string =>
+    patterns.length === 0 ? 'none' : patterns.join(', ');
+  runtime.writeOutput('Desired policy:\n');
+  runtime.writeOutput(
+    `  Skills (native_hook): ${display(policy.skills.native_hook)}\n`,
+  );
+  runtime.writeOutput(
+    `  Skills (injected_mcp): ${display(policy.skills.injected_mcp)}\n`,
+  );
+  runtime.writeOutput(`  MCP: ${display(policy.mcp)}\n`);
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return previous.includes(value) ? previous : [...previous, value];
+}
+
+interface ConfigureOptions {
+  nativeSkill: string[];
+  injectSkill: string[];
+  mcp: string[];
+  allSkills?: SkillMode;
+  allMcp?: boolean;
+}
+
+function desiredSelectionPolicy(
+  command: Command,
+  adapter: AgentAdapter,
+  options: ConfigureOptions,
+): AgentSelectionPolicy {
+  const hasExplicitSkill =
+    options.nativeSkill.length > 0 || options.injectSkill.length > 0;
+  if (options.allSkills !== undefined && hasExplicitSkill) {
+    command.error(
+      'Cannot combine --all-skills with --native-skill or --inject-skill.',
+    );
+  }
+  if (options.allMcp === true && options.mcp.length > 0) {
+    command.error('Cannot combine --all-mcp with --mcp.');
+  }
+
+  const nativeHook = options.allSkills === 'native_hook'
+    ? ['*']
+    : options.nativeSkill;
+  const injectedMcp = options.allSkills === 'injected_mcp'
+    ? ['*']
+    : options.injectSkill;
+  const mcp = options.allMcp === true ? ['*'] : options.mcp;
+
+  if (nativeHook.length > 0 && !adapter.capabilities.nativeSkillEvents) {
+    command.error(`Adapter "${adapter.id}" does not support native_hook Skills.`);
+  }
+  if (injectedMcp.length > 0 && !adapter.capabilities.skillInjection) {
+    command.error(
+      `Adapter "${adapter.id}" does not support injected_mcp Skills.`,
+    );
+  }
+  if (
+    mcp.length > 0 &&
+    !adapter.capabilities.nativeMcpEvents &&
+    !adapter.capabilities.stdioMcpProxy
+  ) {
+    command.error(`Adapter "${adapter.id}" does not support MCP selection.`);
+  }
+
+  return {
+    skills: { native_hook: nativeHook, injected_mcp: injectedMcp },
+    mcp,
+  };
 }
 
 function logTelemetryError(
@@ -408,6 +562,70 @@ export function createProgram(
         } finally {
           closeProxyTelemetry(runtime, telemetry.database);
         }
+      },
+    );
+
+  program
+    .command('list-targets <agent>')
+    .action(
+      async (
+        agent: string,
+        _options: object,
+        command: Command,
+      ) => {
+        const adapter = selectedAdapter(command, registry, agent);
+        printTargets(await adapter.listTargets(), runtime);
+      },
+    );
+
+  program
+    .command('configure <agent>')
+    .option(
+      '--native-skill <pattern>',
+      'select a Skill for native hook collection',
+      collectOption,
+      [],
+    )
+    .option(
+      '--inject-skill <pattern>',
+      'select a Skill for MCP injection',
+      collectOption,
+      [],
+    )
+    .option(
+      '--mcp <pattern>',
+      'select an MCP server or qualified tool',
+      collectOption,
+      [],
+    )
+    .option(
+      '--all-skills <mode>',
+      'select every Skill in one collection mode',
+      (value) => choice(value, skillModes, 'Skill mode'),
+    )
+    .option('--all-mcp', 'select every MCP server')
+    .action(
+      async (
+        agent: string,
+        options: ConfigureOptions,
+        command: Command,
+      ) => {
+        const adapter = selectedAdapter(command, registry, agent);
+        const policy = desiredSelectionPolicy(command, adapter, options);
+        const targets = await adapter.listTargets();
+        for (const skill of targets.skills) {
+          try {
+            selectedSkillMode(policy, skill.name);
+          } catch (error) {
+            command.error(
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+        }
+
+        printSelectionPolicy(policy, runtime);
+        const results = await adapter.configure(policy);
+        if (printResults(results, runtime)) runtime.setExitCode(1);
       },
     );
 

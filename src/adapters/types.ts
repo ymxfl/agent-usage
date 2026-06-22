@@ -1,3 +1,8 @@
+import type {
+  AgentSelectionPolicy,
+  SkillMode,
+} from '../core/selection.js';
+
 export type Scope = 'user' | 'project';
 
 export type Status = 'success' | 'degraded' | 'skipped' | 'failed';
@@ -23,10 +28,35 @@ export interface CoverageReport {
   issues: string[];
 }
 
+export interface DiscoveredSkill {
+  name: string;
+  scope: Scope;
+  path: string;
+  supportedModes: SkillMode[];
+  selectedMode?: SkillMode;
+}
+
+export interface DiscoveredMcp {
+  server: string;
+  scope: Scope;
+  transport: 'stdio' | 'http' | 'sse' | 'unknown';
+  selected?: boolean;
+}
+
+export interface DiscoveredTargets {
+  agent: string;
+  skills: DiscoveredSkill[];
+  mcp: DiscoveredMcp[];
+  unresolved: string[];
+  issues: string[];
+}
+
 export interface AgentAdapter {
   readonly id: string;
   readonly capabilities: Capabilities;
   discover(): Promise<string[]>;
+  listTargets(): Promise<DiscoveredTargets>;
+  configure(policy: AgentSelectionPolicy): Promise<OperationResult[]>;
   install(scope: Scope): Promise<OperationResult[]>;
   sync(scope: Scope): Promise<OperationResult[]>;
   repair(scope: Scope): Promise<OperationResult[]>;

@@ -11,12 +11,14 @@ import type {
   AgentAdapter,
   Capabilities,
   CoverageReport,
+  DiscoveredTargets,
   OperationResult,
   Scope,
 } from '../src/adapters/types.js';
 import { createProgram, runCli, type CliRuntime } from '../src/cli.js';
 import { openUsageDatabase } from '../src/core/database.js';
 import { UsageRepository } from '../src/core/repository.js';
+import type { AgentSelectionPolicy } from '../src/core/selection.js';
 import type { UsageMcpService } from '../src/mcp/service.js';
 import type {
   StdioProtocolObserver,
@@ -35,7 +37,7 @@ afterEach(() => {
 
 const capabilities: Capabilities = {
   nativeSkillEvents: true,
-  skillInjection: false,
+  skillInjection: true,
   nativeMcpEvents: false,
   stdioMcpProxy: true,
   skillWatching: false,
@@ -43,6 +45,14 @@ const capabilities: Capabilities = {
 
 interface FakeAdapter extends AgentAdapter {
   discover: ReturnType<typeof vi.fn<() => Promise<string[]>>>;
+  listTargets: ReturnType<
+    typeof vi.fn<() => Promise<DiscoveredTargets>>
+  >;
+  configure: ReturnType<
+    typeof vi.fn<
+      (policy: AgentSelectionPolicy) => Promise<OperationResult[]>
+    >
+  >;
   install: ReturnType<
     typeof vi.fn<(scope: Scope) => Promise<OperationResult[]>>
   >;
@@ -65,11 +75,22 @@ function result(
   return { status, message };
 }
 
-function fakeAdapter(id = 'codex'): FakeAdapter {
+function fakeAdapter(
+  id = 'codex',
+  capabilityOverrides: Partial<Capabilities> = {},
+): FakeAdapter {
   return {
     id,
-    capabilities,
+    capabilities: { ...capabilities, ...capabilityOverrides },
     discover: vi.fn(async () => []),
+    listTargets: vi.fn(async () => ({
+      agent: id,
+      skills: [],
+      mcp: [],
+      unresolved: [],
+      issues: [],
+    })),
+    configure: vi.fn(async () => [result()]),
     install: vi.fn(async () => [result()]),
     sync: vi.fn(async () => [result()]),
     repair: vi.fn(async () => [result()]),
@@ -135,6 +156,297 @@ async function parse(
     ['node', 'agent-usage', ...args],
   );
 }
+
+describe('target selection commands', () => {
+  it('lists user and project Skills and MCP for only the selected adapter', async () => {
+    const other = fakeAdapter('other');
+    const adapter = fakeAdapter();
+    adapter.listTargets.mockResolvedValue({
+      agent: 'codex',
+      skills: [
+        {
+          name: 'review',
+          scope: 'user',
+          path: '/user/skills/review',
+          supportedModes: ['native_hook'],
+          selectedMode: 'native_hook',
+        },
+        {
+          name: 'deploy',
+          scope: 'project',
+          path: '/project/skills/deploy',
+          supportedModes: ['injected_mcp'],
+        },
+      ],
+      mcp: [
+        {
+          server: 'github',
+          scope: 'user',
+          transport: 'stdio',
+          selected: true,
+        },
+        {
+          server: 'docs',
+          scope: 'project',
+          transport: 'http',
+        },
+      ],
+      unresolved: ['missing-*'],
+      issues: ['docs uses an unsupported transport'],
+    });
+    const fixture = runtimeFixture();
+
+    await parse(
+      registryWith(other, adapter),
+      fixture.runtime,
+      ['list-targets', 'codex'],
+    );
+
+    expect(adapter.listTargets).toHaveBeenCalledOnce();
+    expect(other.listTargets).not.toHaveBeenCalled();
+    expect(fixture.stdout.join('')).toBe(
+      'codex\n' +
+        '  Skills:\n' +
+        '  - review [user] native_hook (selected: native_hook) /user/skills/review\n' +
+        '  - deploy [project] injected_mcp (selected: none) /project/skills/deploy\n' +
+        '  MCP:\n' +
+        '  - github [user] stdio (selected: yes)\n' +
+        '  - docs [project] http (selected: no)\n' +
+        '  Unresolved patterns:\n' +
+        '  - missing-*\n' +
+        '  Issues:\n' +
+        '  - docs uses an unsupported transport\n',
+    );
+  });
+
+  it('prints an explicit empty target state', async () => {
+    const fixture = runtimeFixture();
+
+    await parse(
+      registryWith(fakeAdapter()),
+      fixture.runtime,
+      ['list-targets', 'codex'],
+    );
+
+    expect(fixture.stdout.join('')).toBe(
+      'codex\n' +
+        '  No targets discovered.\n' +
+        '  Skills: none\n' +
+        '  MCP: none\n' +
+        '  Unresolved patterns: none\n' +
+        '  Issues: none\n',
+    );
+  });
+
+  it('builds a replacement policy from repeated selectors and deduplicates exact repeats', async () => {
+    const adapter = fakeAdapter();
+    const fixture = runtimeFixture();
+
+    await parse(registryWith(adapter), fixture.runtime, [
+      'configure',
+      'codex',
+      '--native-skill',
+      'review',
+      '--native-skill',
+      'review',
+      '--native-skill',
+      'test-*',
+      '--inject-skill',
+      'deploy',
+      '--inject-skill',
+      'deploy',
+      '--mcp',
+      'github.*',
+      '--mcp',
+      'github.*',
+    ]);
+
+    expect(adapter.configure).toHaveBeenCalledWith({
+      skills: {
+        native_hook: ['review', 'test-*'],
+        injected_mcp: ['deploy'],
+      },
+      mcp: ['github.*'],
+    });
+    expect(fixture.stdout.join('')).toContain(
+      'Desired policy:\n' +
+        '  Skills (native_hook): review, test-*\n' +
+        '  Skills (injected_mcp): deploy\n' +
+        '  MCP: github.*\n',
+    );
+  });
+
+  it('clears all selections when configure has no options', async () => {
+    const adapter = fakeAdapter();
+    const fixture = runtimeFixture();
+
+    await parse(
+      registryWith(adapter),
+      fixture.runtime,
+      ['configure', 'codex'],
+    );
+
+    expect(adapter.configure).toHaveBeenCalledWith({
+      skills: { native_hook: [], injected_mcp: [] },
+      mcp: [],
+    });
+    expect(fixture.stdout.join('')).toContain(
+      'Skills (native_hook): none\n' +
+        '  Skills (injected_mcp): none\n' +
+        '  MCP: none\n',
+    );
+  });
+
+  it.each(['native_hook', 'injected_mcp'] as const)(
+    'supports --all-skills %s together with --all-mcp',
+    async (mode) => {
+      const adapter = fakeAdapter();
+      const fixture = runtimeFixture();
+
+      await parse(registryWith(adapter), fixture.runtime, [
+        'configure',
+        'codex',
+        '--all-skills',
+        mode,
+        '--all-mcp',
+      ]);
+
+      expect(adapter.configure).toHaveBeenCalledWith({
+        skills: {
+          native_hook: mode === 'native_hook' ? ['*'] : [],
+          injected_mcp: mode === 'injected_mcp' ? ['*'] : [],
+        },
+        mcp: ['*'],
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: 'native_hook',
+      capabilities: { nativeSkillEvents: false },
+      args: ['--native-skill', 'review'],
+    },
+    {
+      name: 'injected_mcp',
+      capabilities: { skillInjection: false },
+      args: ['--inject-skill', 'review'],
+    },
+    {
+      name: 'MCP selection',
+      capabilities: { nativeMcpEvents: false, stdioMcpProxy: false },
+      args: ['--mcp', 'github'],
+    },
+  ])('rejects unsupported $name without configuring', async (testCase) => {
+    const adapter = fakeAdapter('codex', testCase.capabilities);
+    const fixture = runtimeFixture();
+
+    await runCli(
+      ['node', 'agent-usage', 'configure', 'codex', ...testCase.args],
+      registryWith(adapter),
+      fixture.runtime,
+    );
+
+    expect(adapter.configure).not.toHaveBeenCalled();
+    expect(fixture.exitCodes).toContain(1);
+    expect(fixture.stderr.join('')).toMatch(/does not support/i);
+    expect(fixture.stderr.join('')).not.toContain('at Command.');
+  });
+
+  it.each([
+    ['--all-skills', 'native_hook', '--native-skill', 'review'],
+    ['--all-skills', 'injected_mcp', '--inject-skill', 'review'],
+    ['--all-mcp', '--mcp', 'github'],
+  ])('rejects all-target and explicit selector conflicts: %j', async (...args) => {
+    const adapter = fakeAdapter();
+    const fixture = runtimeFixture();
+
+    await runCli(
+      ['node', 'agent-usage', 'configure', 'codex', ...args],
+      registryWith(adapter),
+      fixture.runtime,
+    );
+
+    expect(adapter.configure).not.toHaveBeenCalled();
+    expect(fixture.exitCodes).toContain(1);
+    expect(fixture.stderr.join('')).toMatch(/cannot combine/i);
+    expect(fixture.stderr.join('')).not.toContain('at Command.');
+  });
+
+  it('rejects a discovered Skill matched by both modes before configuring', async () => {
+    const adapter = fakeAdapter();
+    adapter.listTargets.mockResolvedValue({
+      agent: 'codex',
+      skills: [{
+        name: 'review-prod',
+        scope: 'project',
+        path: '/project/review-prod',
+        supportedModes: ['native_hook', 'injected_mcp'],
+      }],
+      mcp: [],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = runtimeFixture();
+
+    await runCli(
+      [
+        'node',
+        'agent-usage',
+        'configure',
+        'codex',
+        '--native-skill',
+        'review-*',
+        '--inject-skill',
+        '*-prod',
+      ],
+      registryWith(adapter),
+      fixture.runtime,
+    );
+
+    expect(adapter.listTargets).toHaveBeenCalledOnce();
+    expect(adapter.configure).not.toHaveBeenCalled();
+    expect(fixture.stderr.join('')).toContain(
+      'Skill "review-prod" matches both native_hook and injected_mcp',
+    );
+    expect(fixture.exitCodes).toContain(1);
+  });
+
+  it.each([
+    ['failed', [1]],
+    ['degraded', []],
+  ] as const)('handles a %s configure result', async (status, exitCodes) => {
+    const adapter = fakeAdapter();
+    adapter.configure.mockResolvedValue([result(status)]);
+    const fixture = runtimeFixture();
+
+    await parse(
+      registryWith(adapter),
+      fixture.runtime,
+      ['configure', 'codex', '--native-skill', 'review'],
+    );
+
+    expect(fixture.stdout.join('')).toContain(`${status}: complete`);
+    expect(fixture.exitCodes).toEqual(exitCodes);
+  });
+
+  it.each(['list-targets', 'configure'])(
+    'reports an unknown agent cleanly for %s',
+    async (command) => {
+      const fixture = runtimeFixture();
+
+      await runCli(
+        ['node', 'agent-usage', command, 'missing'],
+        registryWith(fakeAdapter()),
+        fixture.runtime,
+      );
+
+      expect(fixture.exitCodes).toContain(1);
+      expect(fixture.stderr.join('')).toContain('Unknown adapter "missing"');
+      expect(fixture.stderr.join('')).not.toContain('at Command.');
+    },
+  );
+});
 
 describe('lifecycle commands', () => {
   it.each(['install', 'sync', 'repair', 'uninstall'] as const)(

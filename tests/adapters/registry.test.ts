@@ -5,9 +5,11 @@ import type {
   AgentAdapter,
   Capabilities,
   CoverageReport,
+  DiscoveredTargets,
   OperationResult,
   Scope,
 } from '../../src/adapters/types.js';
+import type { AgentSelectionPolicy } from '../../src/core/selection.js';
 
 const capabilities: Capabilities = {
   nativeSkillEvents: true,
@@ -25,11 +27,20 @@ function adapter(id: string): AgentAdapter {
     mcp: 'available',
     issues: [],
   };
+  const targets: DiscoveredTargets = {
+    agent: id,
+    skills: [],
+    mcp: [],
+    unresolved: [],
+    issues: [],
+  };
 
   return {
     id,
     capabilities,
     discover: async () => [],
+    listTargets: async () => targets,
+    configure: async (_policy: AgentSelectionPolicy) => [result],
     install: async (_scope: Scope) => [result],
     sync: async (_scope: Scope) => [result],
     repair: async (_scope: Scope) => [result],
