@@ -160,6 +160,7 @@ describe('usagePaths', () => {
   it('uses an explicit root override', () => {
     expect(usagePaths('/tmp/custom-agent-usage')).toEqual({
       root: '/tmp/custom-agent-usage',
+      config: '/tmp/custom-agent-usage/config.json',
       database: '/tmp/custom-agent-usage/usage.db',
       state: '/tmp/custom-agent-usage/state',
       errors: '/tmp/custom-agent-usage/logs/errors.log',
@@ -173,6 +174,7 @@ describe('usagePaths', () => {
       process.env.AGENT_USAGE_HOME = '/tmp/environment-agent-usage';
       expect(usagePaths()).toEqual({
         root: '/tmp/environment-agent-usage',
+        config: '/tmp/environment-agent-usage/config.json',
         database: '/tmp/environment-agent-usage/usage.db',
         state: '/tmp/environment-agent-usage/state',
         errors: '/tmp/environment-agent-usage/logs/errors.log',
@@ -181,6 +183,7 @@ describe('usagePaths', () => {
       delete process.env.AGENT_USAGE_HOME;
       expect(usagePaths()).toEqual({
         root: join(homedir(), '.agent-usage'),
+        config: join(homedir(), '.agent-usage', 'config.json'),
         database: join(homedir(), '.agent-usage', 'usage.db'),
         state: join(homedir(), '.agent-usage', 'state'),
         errors: join(homedir(), '.agent-usage', 'logs', 'errors.log'),

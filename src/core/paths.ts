@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 export interface UsagePaths {
   root: string;
+  config: string;
   database: string;
   state: string;
   errors: string;
@@ -15,6 +16,7 @@ export function usagePaths(
 
   return {
     root,
+    config: join(root, 'config.json'),
     database: join(root, 'usage.db'),
     state,
     errors: join(root, 'logs', 'errors.log'),

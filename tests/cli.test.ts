@@ -113,6 +113,7 @@ function runtimeFixture(
     runtime: {
       paths: () => ({
         root,
+        config: join(root, 'config.json'),
         database: join(root, 'usage.db'),
         state: join(root, 'state'),
         errors: join(root, 'errors.log'),
