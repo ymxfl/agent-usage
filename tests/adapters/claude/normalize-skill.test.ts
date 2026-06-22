@@ -80,7 +80,7 @@ describe('normalizeClaudeHook skill events', () => {
     });
   });
 
-  it('ignores non-slash prompt expansions and slash expansions without a name', () => {
+  it('ignores a complete mcp_prompt expansion', () => {
     const direct = fixture('direct-skill') as Record<string, unknown>;
 
     expect(
@@ -89,11 +89,58 @@ describe('normalizeClaudeHook skill events', () => {
         deterministicDeps,
       ),
     ).toBeNull();
+  });
+
+  it.each([
+    'expansion_type',
+    'command_name',
+    'command_args',
+    'command_source',
+    'prompt',
+  ])('requires UserPromptExpansion field %s', (field) => {
+    const direct = fixture('direct-skill') as Record<string, unknown>;
+    const malformed = { ...direct };
+    delete malformed[field];
+
+    expect(() =>
+      normalizeClaudeHook(malformed, deterministicDeps),
+    ).toThrow();
+  });
+
+  it('allows empty command arguments', () => {
+    const direct = fixture('direct-skill') as Record<string, unknown>;
+
     expect(
+      normalizeClaudeHook(
+        { ...direct, command_args: '' },
+        deterministicDeps,
+      ),
+    ).toMatchObject({ name: 'release-review', outcome: 'unknown' });
+  });
+
+  it('rejects empty required UserPromptExpansion identity fields', () => {
+    const direct = fixture('direct-skill') as Record<string, unknown>;
+
+    expect(() =>
       normalizeClaudeHook({ ...direct, command_name: '' }, deterministicDeps),
-    ).toBeNull();
-    const { command_name: _, ...withoutName } = direct;
-    expect(normalizeClaudeHook(withoutName, deterministicDeps)).toBeNull();
+    ).toThrow();
+    expect(() =>
+      normalizeClaudeHook({ ...direct, command_source: '' }, deterministicDeps),
+    ).toThrow();
+    expect(() =>
+      normalizeClaudeHook({ ...direct, prompt: '' }, deterministicDeps),
+    ).toThrow();
+  });
+
+  it('rejects an unsupported UserPromptExpansion type', () => {
+    const direct = fixture('direct-skill') as Record<string, unknown>;
+
+    expect(() =>
+      normalizeClaudeHook(
+        { ...direct, expansion_type: 'future_expansion' },
+        deterministicDeps,
+      ),
+    ).toThrow();
   });
 
   it('ignores unrelated tool hooks, including case variants of Skill', () => {
@@ -147,6 +194,48 @@ describe('normalizeClaudeHook skill events', () => {
         { ...success, tool_input: {} },
         deterministicDeps,
       ),
+    ).toThrow();
+  });
+
+  it('requires the event-specific success response and failure error fields', () => {
+    const success = fixture('model-skill-success') as Record<string, unknown>;
+    const failure = fixture('model-skill-failure') as Record<string, unknown>;
+    const { tool_response: _, ...withoutResponse } = success;
+    const { error: __, ...withoutError } = failure;
+
+    expect(() =>
+      normalizeClaudeHook(withoutResponse, deterministicDeps),
+    ).toThrow();
+    expect(() =>
+      normalizeClaudeHook(withoutError, deterministicDeps),
+    ).toThrow();
+    expect(() =>
+      normalizeClaudeHook({ ...failure, error: '' }, deterministicDeps),
+    ).toThrow();
+    expect(() =>
+      normalizeClaudeHook(
+        { ...failure, is_interrupt: 'false' },
+        deterministicDeps,
+      ),
+    ).toThrow();
+  });
+
+  it.each([
+    ['model-skill-success', 'tool_name'],
+    ['model-skill-success', 'tool_input'],
+    ['model-skill-success', 'tool_use_id'],
+    ['model-skill-success', 'tool_response'],
+    ['model-skill-failure', 'tool_name'],
+    ['model-skill-failure', 'tool_input'],
+    ['model-skill-failure', 'tool_use_id'],
+    ['model-skill-failure', 'error'],
+  ])('requires %s field %s', (fixtureName, field) => {
+    const input = fixture(fixtureName) as Record<string, unknown>;
+    const malformed = { ...input };
+    delete malformed[field];
+
+    expect(() =>
+      normalizeClaudeHook(malformed, deterministicDeps),
     ).toThrow();
   });
 

@@ -14,8 +14,11 @@ export const claudeHookSchema = z
 
 export const claudeUserPromptExpansionSchema = claudeHookSchema.extend({
   hook_event_name: z.literal('UserPromptExpansion'),
-  expansion_type: nonemptyString,
-  command_name: z.string().optional(),
+  expansion_type: z.enum(['slash_command', 'mcp_prompt']),
+  command_name: nonemptyString,
+  command_args: z.string(),
+  command_source: nonemptyString,
+  prompt: nonemptyString,
 });
 
 const claudeToolHookShape = {
@@ -25,14 +28,25 @@ const claudeToolHookShape = {
   duration_ms: z.number().finite().nonnegative().optional(),
 };
 
-export const claudePostToolUseSchema = claudeHookSchema.extend({
-  hook_event_name: z.literal('PostToolUse'),
-  ...claudeToolHookShape,
-});
+export const claudePostToolUseSchema = claudeHookSchema
+  .extend({
+    hook_event_name: z.literal('PostToolUse'),
+    ...claudeToolHookShape,
+    tool_response: z.unknown(),
+  })
+  .refine(
+    (input) => Object.prototype.hasOwnProperty.call(input, 'tool_response'),
+    {
+      message: 'PostToolUse requires tool_response',
+      path: ['tool_response'],
+    },
+  );
 
 export const claudePostToolUseFailureSchema = claudeHookSchema.extend({
   hook_event_name: z.literal('PostToolUseFailure'),
   ...claudeToolHookShape,
+  error: nonemptyString,
+  is_interrupt: z.boolean().optional(),
 });
 
 export const claudeSkillToolInputSchema = z
