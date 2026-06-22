@@ -14,6 +14,13 @@ import {
 } from './hook-input.js';
 
 const agent = 'claude-code';
+const mcpPrefix = 'mcp__';
+const excludedMcpServers = new Set([
+  'usage-stats',
+  'agent-usage',
+  'plugin_agent-usage_usage-stats',
+  'plugin_agent_usage_usage_stats',
+]);
 
 export interface ClaudeNormalizerDependencies {
   now?: () => Date;
@@ -44,6 +51,55 @@ function projectFromCwd(cwd: string): string | undefined {
   }
 
   return candidate;
+}
+
+function parseMcpToolName(
+  toolName: string,
+): { server: string; tool: string } | null {
+  if (!toolName.startsWith(mcpPrefix)) return null;
+
+  const remainder = toolName.slice(mcpPrefix.length);
+  const separatorIndex = remainder.indexOf('__');
+
+  if (separatorIndex <= 0) return null;
+
+  const server = remainder.slice(0, separatorIndex);
+  const tool = remainder.slice(separatorIndex + 2);
+
+  if (tool.length === 0) return null;
+
+  return { server, tool };
+}
+
+function normalizeToolMcp(
+  input: ClaudePostToolUseInput | ClaudePostToolUseFailureInput,
+  occurredAt: string,
+): UsageEvent | null {
+  const name = parseMcpToolName(input.tool_name);
+
+  if (name === null || excludedMcpServers.has(name.server)) return null;
+
+  const project = projectFromCwd(input.cwd);
+
+  return parseUsageEvent({
+    schemaVersion: 1,
+    occurredAt,
+    agent,
+    sessionId: input.session_id,
+    ...(project === undefined ? {} : { project }),
+    kind: 'mcp_call',
+    mcpServer: name.server,
+    name: name.tool,
+    outcome: input.hook_event_name === 'PostToolUseFailure'
+      ? 'failure'
+      : 'success',
+    ...(input.duration_ms === undefined
+      ? {}
+      : { durationMs: input.duration_ms }),
+    evidence: 'native_hook',
+    precision: 'exact',
+    dedupeKey: nativeDedupeKey(agent, input.tool_use_id),
+  });
 }
 
 function normalizeToolSkill(
@@ -117,17 +173,15 @@ export function normalizeClaudeHook(
   }
 
   if (common.hook_event_name === 'PostToolUse') {
-    return normalizeToolSkill(
-      claudePostToolUseSchema.parse(raw),
-      occurredAt,
-    );
+    const input = claudePostToolUseSchema.parse(raw);
+    return normalizeToolMcp(input, occurredAt)
+      ?? normalizeToolSkill(input, occurredAt);
   }
 
   if (common.hook_event_name === 'PostToolUseFailure') {
-    return normalizeToolSkill(
-      claudePostToolUseFailureSchema.parse(raw),
-      occurredAt,
-    );
+    const input = claudePostToolUseFailureSchema.parse(raw);
+    return normalizeToolMcp(input, occurredAt)
+      ?? normalizeToolSkill(input, occurredAt);
   }
 
   return null;

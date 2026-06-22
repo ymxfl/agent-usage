@@ -1,0 +1,13 @@
+{
+  "session_id": "session-mcp-failure",
+  "cwd": "/Users/alice/work/incident-console",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "mcp__sentry-cloud__create_issue",
+  "tool_input": {
+    "description": "private incident details"
+  },
+  "tool_use_id": "tool-use-mcp-failure",
+  "duration_ms": 19,
+  "error": "sensitive upstream failure",
+  "is_interrupt": false
+}

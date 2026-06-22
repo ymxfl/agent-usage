@@ -1,0 +1,14 @@
+{
+  "session_id": "session-mcp-success",
+  "cwd": "/Users/alice/work/payments-api",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "mcp__github_enterprise-v2__search_repositories__advanced",
+  "tool_input": {
+    "query": "sensitive repository query"
+  },
+  "tool_response": {
+    "content": "secret repository results"
+  },
+  "tool_use_id": "tool-use-mcp-success",
+  "duration_ms": 47
+}
