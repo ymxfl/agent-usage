@@ -21,6 +21,7 @@ Users query the data from the agent with `/usage-stats`. The first release does 
 - Best-effort JoyCode Skill telemetry through an injected MCP accounting instruction.
 - Exact JoyCode stdio MCP telemetry through a transparent JSON-RPC proxy.
 - Incremental discovery and instrumentation of newly added JoyCode Skills.
+- Explicit per-Agent allowlists for Skill and MCP collection; no target is collected by default.
 - Local SQLite storage in WAL mode.
 - `/usage-stats`, `health`, `sync`, `repair`, and `uninstall` operations.
 - Idempotent configuration edits and symmetric cleanup.
@@ -79,12 +80,52 @@ Agent session
   │   └─ query_usage
   └─ local core
       ├─ event normalization
+      ├─ selection policy
       ├─ deduplication
       ├─ SQLite WAL storage
       └─ aggregation/reporting
 ```
 
 The core has no Claude Code or JoyCode path logic. Agent adapters discover configuration, select observation strategies, and translate platform events into the versioned core schema.
+
+## Selection Policy
+
+Collection is opt-in. A fresh installation records no Skill or MCP usage until the user selects targets. The versioned policy lives at `~/.agent-usage/config.json` and is shared by the CLI, hooks, injectors, watchers, and proxies.
+
+```json
+{
+  "version": 1,
+  "agents": {
+    "claude-code": {
+      "skills": {
+        "native_hook": ["review"],
+        "injected_mcp": ["deploy"]
+      },
+      "mcp": ["github.*"]
+    },
+    "joycode": {
+      "skills": {
+        "injected_mcp": ["deploy", "release-*"]
+      },
+      "mcp": ["github", "filesystem"]
+    }
+  }
+}
+```
+
+Patterns support literal names and `*` wildcards only. Matching is case-sensitive and anchored to the complete Skill name or MCP identifier. MCP identifiers use `server` or `server.tool`; selecting a server selects all its tools. Unsupported modes are rejected by the adapter: JoyCode cannot select `native_hook`, and agents without a proxy cannot select proxy-only transport.
+
+Commands:
+
+```text
+agent-usage list-targets <agent>
+agent-usage configure <agent> --native-skill <pattern> --inject-skill <pattern> --mcp <pattern>
+agent-usage configure <agent> --all-skills --all-mcp
+```
+
+Repeated options build the complete desired allowlist rather than appending invisibly. `configure` prints the resulting policy and requires `--all-skills` or `--all-mcp` for broad collection. Removing a target takes effect on the next hook call or reconciliation: native events are discarded, injected managed blocks are removed, and deselected proxied MCP entries are restored.
+
+`list-targets` discovers available user and current-project Skills and MCP servers, then shows the selected mode, unresolved patterns, and unsupported transports. `health` reports the same coverage without mutating configuration.
 
 ## Components
 
@@ -152,6 +193,8 @@ interface AgentAdapter {
   };
 
   discover(): Promise<AgentInstallation[]>;
+  listTargets(): Promise<DiscoveredTargets>;
+  configure(policy: AgentSelectionPolicy): Promise<OperationResult[]>;
   install(scope: Scope): Promise<InstallResult>;
   sync(scope: Scope): Promise<SyncResult>;
   uninstall(scope: Scope): Promise<UninstallResult>;
@@ -177,11 +220,13 @@ The adapter uses:
 - `UserPromptExpansion` for directly typed `/skill-name` commands, which bypass the Skill tool hook path.
 - MCP tool matchers for names following `mcp__<server>__<tool>`.
 
+The hook command loads the current selection policy before storing an event. Skill events selected as `native_hook` and MCP events matching the MCP allowlist are stored; all others are ignored. For selected `injected_mcp` Skills, the Claude adapter applies the same managed block format used by JoyCode and suppresses the corresponding native Skill event to prevent double counting.
+
 Native hook events supply session identifiers, tool-use identifiers, outcomes, and durations. The adapter uses `tool_use_id` as the primary deduplication key.
 
 Claude Code enterprise settings may reject user hooks. `health` detects this condition and reports degraded coverage rather than claiming installation success.
 
-No existing user Skill files are modified for Claude Code. The only plain Skill written is the installer-owned `/usage-stats` alias. Newly installed Skills are covered automatically by the native hook matchers.
+Claude Skill files are modified only when the user explicitly selects `injected_mcp`. Native-only and unselected Skills remain untouched. Newly installed Skills become eligible for pattern matching but are not collected unless a configured pattern matches.
 
 ## JoyCode Adapter
 
@@ -197,8 +242,8 @@ The global installation:
 
 1. Registers the `usage-stats` MCP server in the user MCP config.
 2. Installs a `/usage-stats` Skill and JoyCode command entry.
-3. Instruments existing user Skills.
-4. Wraps existing user-level stdio MCP commands with the statistics proxy.
+3. Instruments only existing user Skills selected for `injected_mcp`.
+4. Wraps only selected existing user-level stdio MCP commands with the statistics proxy.
 5. Records every mutation in the installation state manifest.
 
 When the MCP server starts in a project, it also reconciles that project's Skill root. Project MCP wrapping remains an explicit `sync` operation because changing a live MCP configuration does not affect already-started servers.
@@ -232,6 +277,8 @@ The injector:
 
 At MCP server startup, the adapter scans user and current-project Skill roots. During the session, it watches those roots and debounces create/change events before running the same idempotent reconciliation.
 
+Reconciliation evaluates the selection policy on every pass. A newly added Skill is injected only when its name matches an `injected_mcp` pattern. If a previously injected Skill is deselected, reconciliation removes only the managed accounting block and keeps the rest of the file.
+
 The state manifest records canonical path, Skill ID, injection version, and content hashes. If an external Skill update removes the block, reconciliation restores it. Deleted Skills are marked absent. Uninstall removes only managed blocks from files still present.
 
 There is a known same-session race when a Skill is created and invoked before the watcher writes the block. The system guarantees reconciliation for the next invocation or next session, not zero-loss same-session injection.
@@ -250,6 +297,8 @@ Commands:
 
 ```text
 agent-usage install <agent>
+agent-usage list-targets <agent>
+agent-usage configure <agent> [selection options]
 agent-usage sync [agent]
 agent-usage health [agent]
 agent-usage repair [agent]
@@ -281,6 +330,7 @@ The terminal report includes:
 - MCP attempts, successes, failures, unknown outcomes, and average duration.
 - Top Skills, MCP servers, and MCP tools.
 - Coverage warnings such as `best-effort`, `stdio-only`, read-only Skills, hook policy blocks, and pending sync.
+- Selected targets, unresolved patterns, and explicit confirmation when collection is disabled because the allowlist is empty.
 
 `query_usage` returns structured data; each Agent's `/usage-stats` Skill handles presentation without exposing database details to the model.
 
@@ -324,6 +374,7 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 - Deduplication by native ID and JoyCode connection/Skill ID.
 - Time-range aggregation and accuracy labels.
 - Concurrent SQLite writers and lock timeout behavior.
+- Selection parsing, anchored wildcard matching, mode validation, atomic policy updates, and empty-policy behavior.
 
 ### Injection tests
 
@@ -338,6 +389,8 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 - Model-triggered and directly typed Skill fixtures.
 - Duplicate `tool_use_id` handling.
 - Managed policy degradation.
+- Native and injected Skill selection without double counting.
+- MCP events outside the allowlist are ignored.
 
 ### JoyCode adapter tests
 
@@ -345,6 +398,8 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 - Preservation of sibling MCP servers and prompt entries.
 - Registration, sync, repair, and symmetric uninstall.
 - Injected MCP duplicate suppression.
+- Only selected Skills are injected and only selected stdio MCP servers are wrapped.
+- Deselecting a Skill removes the managed block; incremental matches are injected.
 
 ### MCP proxy tests
 
@@ -355,7 +410,7 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 
 ### End-to-end validation
 
-- Real Claude Code session with one Skill and one MCP call.
+- Real Claude Code session selecting one existing Skill as `native_hook` and another as `injected_mcp`, plus one selected MCP call when a safe test server is available.
 - Real JoyCode session with injected Skill accounting and a proxied stdio MCP server.
 - New JoyCode Skill added during an active session.
 - `/usage-stats` output showing correct counts and accuracy labels.
@@ -363,8 +418,11 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 ## Acceptance Criteria
 
 - A user can install once for Claude Code and JoyCode at user scope.
-- Claude Code records native Skill and MCP events without modifying Skill files.
-- JoyCode existing and newly discovered Skills receive exactly one current managed block.
+- A fresh install records nothing until targets are explicitly selected.
+- Users can list targets and select individual Skill modes and MCP servers with literal or wildcard patterns.
+- Claude Code records selected native Skill and MCP events without modifying native-only Skill files; only Skills selected for `injected_mcp` receive a managed block.
+- Selected JoyCode existing and newly discovered Skills receive exactly one current managed block.
+- Unselected Skills have no managed block and unselected MCP servers are not proxied or stored.
 - JoyCode repeated `record_skill` calls in one MCP connection do not inflate the portable count.
 - JoyCode stdio MCP calls are relayed transparently and counted with outcomes.
 - `/usage-stats` reports the last seven days by default and labels accuracy and transport coverage.
