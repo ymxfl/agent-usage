@@ -120,10 +120,10 @@ Commands:
 ```text
 agent-usage list-targets <agent>
 agent-usage configure <agent> --native-skill <pattern> --inject-skill <pattern> --mcp <pattern>
-agent-usage configure <agent> --all-skills --all-mcp
+agent-usage configure <agent> --all-skills <native_hook|injected_mcp> --all-mcp
 ```
 
-Repeated options build the complete desired allowlist rather than appending invisibly. `configure` prints the resulting policy and requires `--all-skills` or `--all-mcp` for broad collection. Removing a target takes effect on the next hook call or reconciliation: native events are discarded, injected managed blocks are removed, and deselected proxied MCP entries are restored.
+Repeated options build the complete desired allowlist rather than appending invisibly. `configure` prints the resulting policy and requires `--all-skills <mode>` or `--all-mcp` for broad collection. A currently discovered Skill that matches both modes is rejected; a later conflicting match is left uninstrumented and reported by `health` until the policy is corrected. Removing a target takes effect on the next hook call or reconciliation: native events are discarded, injected managed blocks are removed, and deselected proxied MCP entries are restored.
 
 `list-targets` discovers available user and current-project Skills and MCP servers, then shows the selected mode, unresolved patterns, and unsupported transports. `health` reports the same coverage without mutating configuration.
 
