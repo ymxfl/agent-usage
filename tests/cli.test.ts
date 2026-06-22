@@ -389,7 +389,14 @@ describe('target selection commands', () => {
     expect(fixture.exitCodes).toContain(1);
   });
 
-  it.each(['remote', 'remote.*'])(
+  it.each([
+    'remote',
+    'remote.*',
+    '*.search',
+    '*search',
+    '*',
+    'rem*ch',
+  ])(
     'rejects proxy-only selection %s for a discovered HTTP MCP server',
     async (pattern) => {
       const adapter = fakeAdapter();
@@ -427,6 +434,34 @@ describe('target selection commands', () => {
     },
   );
 
+  it('leaves an unrelated future MCP pattern to the adapter', async () => {
+    const adapter = fakeAdapter();
+    adapter.listTargets.mockResolvedValue({
+      agent: 'codex',
+      skills: [],
+      mcp: [{
+        server: 'remote',
+        scope: 'project',
+        transport: 'http',
+      }],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = runtimeFixture();
+
+    await parse(registryWith(adapter), fixture.runtime, [
+      'configure',
+      'codex',
+      '--mcp',
+      'local.*',
+    ]);
+
+    expect(adapter.configure).toHaveBeenCalledWith({
+      skills: { native_hook: [], injected_mcp: [] },
+      mcp: ['local.*'],
+    });
+  });
+
   it('allows a selected discovered HTTP MCP server with native MCP events', async () => {
     const adapter = fakeAdapter('codex', {
       nativeMcpEvents: true,
@@ -458,6 +493,26 @@ describe('target selection commands', () => {
     });
     expect(fixture.exitCodes).toEqual([]);
   });
+
+  it.each(['--native-skill', '--inject-skill', '--mcp'])(
+    'rejects an exact-empty pattern for %s before adapter discovery',
+    async (option) => {
+      const adapter = fakeAdapter();
+      const fixture = runtimeFixture();
+
+      await runCli(
+        ['node', 'agent-usage', 'configure', 'codex', option, ''],
+        registryWith(adapter),
+        fixture.runtime,
+      );
+
+      expect(adapter.listTargets).not.toHaveBeenCalled();
+      expect(adapter.configure).not.toHaveBeenCalled();
+      expect(fixture.exitCodes).toContain(1);
+      expect(fixture.stderr.join('')).toMatch(/must not be empty/i);
+      expect(fixture.stderr.join('')).not.toContain('at Command.');
+    },
+  );
 
   it.each([
     ['--all-skills', 'native_hook', '--native-skill', 'review'],

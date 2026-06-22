@@ -267,6 +267,9 @@ function printSelectionPolicy(
 }
 
 function collectOption(value: string, previous: string[]): string[] {
+  if (value.length === 0) {
+    throw new InvalidArgumentError('selection pattern must not be empty');
+  }
   return previous.includes(value) ? previous : [...previous, value];
 }
 
@@ -324,26 +327,92 @@ function desiredSelectionPolicy(
   };
 }
 
+function epsilonClosure(
+  pattern: string,
+  initial: Iterable<number>,
+): Set<number> {
+  const states = new Set(initial);
+  const pending = [...states];
+  while (pending.length > 0) {
+    const state = pending.pop();
+    if (state === undefined || pattern[state] !== '*') continue;
+    const next = state + 1;
+    if (!states.has(next)) {
+      states.add(next);
+      pending.push(next);
+    }
+  }
+  return states;
+}
+
+function statesAfterFixedPrefix(
+  pattern: string,
+  prefix: string,
+): Set<number> {
+  let states = epsilonClosure(pattern, [0]);
+  for (let index = 0; index < prefix.length; index += 1) {
+    const character = prefix[index];
+    const next = new Set<number>();
+    for (const state of states) {
+      const token = pattern[state];
+      if (token === '*') next.add(state);
+      else if (token === character) next.add(state + 1);
+    }
+    states = epsilonClosure(pattern, next);
+    if (states.size === 0) return states;
+  }
+  return states;
+}
+
+function canMatchNonemptySuffix(
+  pattern: string,
+  initial: Iterable<number>,
+): boolean {
+  const queue: Array<{ state: number; consumed: boolean }> = [];
+  const visited = new Set<string>();
+  const enqueue = (state: number, consumed: boolean): void => {
+    const key = `${state}:${consumed ? 1 : 0}`;
+    if (visited.has(key)) return;
+    visited.add(key);
+    queue.push({ state, consumed });
+  };
+  for (const state of initial) enqueue(state, false);
+
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    const current = queue[cursor];
+    if (current === undefined) continue;
+    if (current.state === pattern.length) {
+      if (current.consumed) return true;
+      continue;
+    }
+
+    if (pattern[current.state] === '*') {
+      enqueue(current.state + 1, current.consumed);
+      enqueue(current.state, true);
+    } else {
+      enqueue(current.state + 1, true);
+    }
+  }
+  return false;
+}
+
+function globCanSelectQualifiedTool(
+  pattern: string,
+  server: string,
+): boolean {
+  const states = statesAfterFixedPrefix(pattern, `${server}.`);
+  return canMatchNonemptySuffix(pattern, states);
+}
+
 function selectsMcpServer(
   policy: AgentSelectionPolicy,
   server: string,
 ): boolean {
-  return policy.mcp.some((pattern) => {
-    if (matchSelectionPattern(pattern, server)) return true;
-
-    let separator = pattern.indexOf('.');
-    while (separator >= 0) {
-      const serverPattern = pattern.slice(0, separator);
-      if (
-        serverPattern.length > 0 &&
-        matchSelectionPattern(serverPattern, server)
-      ) {
-        return true;
-      }
-      separator = pattern.indexOf('.', separator + 1);
-    }
-    return false;
-  });
+  return policy.mcp.some(
+    (pattern) =>
+      matchSelectionPattern(pattern, server) ||
+      globCanSelectQualifiedTool(pattern, server),
+  );
 }
 
 function logTelemetryError(
