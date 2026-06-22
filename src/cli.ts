@@ -30,6 +30,7 @@ import {
 } from './core/query.js';
 import { UsageRepository } from './core/repository.js';
 import {
+  matchSelectionPattern,
   selectedSkillMode,
   skillModes,
   type AgentSelectionPolicy,
@@ -323,6 +324,28 @@ function desiredSelectionPolicy(
   };
 }
 
+function selectsMcpServer(
+  policy: AgentSelectionPolicy,
+  server: string,
+): boolean {
+  return policy.mcp.some((pattern) => {
+    if (matchSelectionPattern(pattern, server)) return true;
+
+    let separator = pattern.indexOf('.');
+    while (separator >= 0) {
+      const serverPattern = pattern.slice(0, separator);
+      if (
+        serverPattern.length > 0 &&
+        matchSelectionPattern(serverPattern, server)
+      ) {
+        return true;
+      }
+      separator = pattern.indexOf('.', separator + 1);
+    }
+    return false;
+  });
+}
+
 function logTelemetryError(
   runtime: CliRuntime,
   message: string,
@@ -614,12 +637,33 @@ export function createProgram(
         const policy = desiredSelectionPolicy(command, adapter, options);
         const targets = await adapter.listTargets();
         for (const skill of targets.skills) {
+          let mode: SkillMode | undefined;
           try {
-            selectedSkillMode(policy, skill.name);
+            mode = selectedSkillMode(policy, skill.name);
           } catch (error) {
             command.error(
               error instanceof Error ? error.message : String(error),
             );
+          }
+          if (
+            mode !== undefined &&
+            !skill.supportedModes.includes(mode)
+          ) {
+            command.error(
+              `Skill "${skill.name}" does not support ${mode}.`,
+            );
+          }
+        }
+        if (!adapter.capabilities.nativeMcpEvents) {
+          for (const server of targets.mcp) {
+            if (
+              server.transport !== 'stdio' &&
+              selectsMcpServer(policy, server.server)
+            ) {
+              command.error(
+                `MCP server "${server.server}" uses ${server.transport}, which requires native MCP events.`,
+              );
+            }
           }
         }
 

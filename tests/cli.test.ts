@@ -353,6 +353,112 @@ describe('target selection commands', () => {
     expect(fixture.stderr.join('')).not.toContain('at Command.');
   });
 
+  it('rejects a selected mode unsupported by the discovered Skill', async () => {
+    const adapter = fakeAdapter();
+    adapter.listTargets.mockResolvedValue({
+      agent: 'codex',
+      skills: [{
+        name: 'read-only-review',
+        scope: 'user',
+        path: '/skills/read-only-review',
+        supportedModes: ['native_hook'],
+      }],
+      mcp: [],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = runtimeFixture();
+
+    await runCli(
+      [
+        'node',
+        'agent-usage',
+        'configure',
+        'codex',
+        '--inject-skill',
+        'read-only-*',
+      ],
+      registryWith(adapter),
+      fixture.runtime,
+    );
+
+    expect(adapter.configure).not.toHaveBeenCalled();
+    expect(fixture.stderr.join('')).toContain(
+      'Skill "read-only-review" does not support injected_mcp',
+    );
+    expect(fixture.exitCodes).toContain(1);
+  });
+
+  it.each(['remote', 'remote.*'])(
+    'rejects proxy-only selection %s for a discovered HTTP MCP server',
+    async (pattern) => {
+      const adapter = fakeAdapter();
+      adapter.listTargets.mockResolvedValue({
+        agent: 'codex',
+        skills: [],
+        mcp: [{
+          server: 'remote',
+          scope: 'project',
+          transport: 'http',
+        }],
+        unresolved: [],
+        issues: [],
+      });
+      const fixture = runtimeFixture();
+
+      await runCli(
+        [
+          'node',
+          'agent-usage',
+          'configure',
+          'codex',
+          '--mcp',
+          pattern,
+        ],
+        registryWith(adapter),
+        fixture.runtime,
+      );
+
+      expect(adapter.configure).not.toHaveBeenCalled();
+      expect(fixture.stderr.join('')).toContain(
+        'MCP server "remote" uses http, which requires native MCP events',
+      );
+      expect(fixture.exitCodes).toContain(1);
+    },
+  );
+
+  it('allows a selected discovered HTTP MCP server with native MCP events', async () => {
+    const adapter = fakeAdapter('codex', {
+      nativeMcpEvents: true,
+      stdioMcpProxy: false,
+    });
+    adapter.listTargets.mockResolvedValue({
+      agent: 'codex',
+      skills: [],
+      mcp: [{
+        server: 'remote',
+        scope: 'project',
+        transport: 'http',
+      }],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = runtimeFixture();
+
+    await parse(registryWith(adapter), fixture.runtime, [
+      'configure',
+      'codex',
+      '--mcp',
+      'remote.*',
+    ]);
+
+    expect(adapter.configure).toHaveBeenCalledWith({
+      skills: { native_hook: [], injected_mcp: [] },
+      mcp: ['remote.*'],
+    });
+    expect(fixture.exitCodes).toEqual([]);
+  });
+
   it.each([
     ['--all-skills', 'native_hook', '--native-skill', 'review'],
     ['--all-skills', 'injected_mcp', '--inject-skill', 'review'],
