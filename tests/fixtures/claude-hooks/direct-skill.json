@@ -1,0 +1,12 @@
+{
+  "session_id": "session-direct-123",
+  "transcript_path": "/Users/alice/.claude/projects/payments/transcript.jsonl",
+  "cwd": "/Users/alice/work/payments-api",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptExpansion",
+  "expansion_type": "slash_command",
+  "command_name": "release-review",
+  "command_args": "production --token sensitive-argument",
+  "command_source": "skill",
+  "prompt": "expanded prompt containing sensitive instructions"
+}

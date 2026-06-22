@@ -1,0 +1,14 @@
+{
+  "session_id": "session-model-999",
+  "cwd": "/Users/alice/work/agent-usage",
+  "hook_event_name": "PostToolUseFailure",
+  "tool_name": "Skill",
+  "tool_input": {
+    "skill": "incident-response",
+    "args": "private failure arguments"
+  },
+  "tool_use_id": "tool-use-failure-321",
+  "duration_ms": 31,
+  "error": "sensitive tool failure",
+  "is_interrupt": false
+}

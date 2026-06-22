@@ -1,0 +1,16 @@
+{
+  "session_id": "session-model-456",
+  "cwd": "/Users/alice/work/agent-usage",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Skill",
+  "tool_input": {
+    "skill": "test-driven-development",
+    "args": "secret model-supplied arguments"
+  },
+  "tool_response": {
+    "content": "sensitive skill result"
+  },
+  "tool_use_id": "tool-use-success-789",
+  "duration_ms": 125,
+  "future_official_field": "accepted"
+}
