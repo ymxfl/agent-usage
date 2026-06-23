@@ -109,9 +109,44 @@ export function buildUsageMcpServer(service: UsageMcpService): McpServer {
   return server;
 }
 
+/**
+ * Optional lifecycle bound to an MCP session. When supplied to
+ * {@link runUsageMcpServer}, `start()` runs before the stdio transport connects
+ * (so a watcher can begin observing) and `close()` runs when the session ends
+ * (so resources are released). Agents that don't supply a lifecycle omit it.
+ */
+export interface McpLifecycle {
+  start(): Promise<void>;
+  close(): Promise<void>;
+}
+
 export async function runUsageMcpServer(
   service: UsageMcpService,
+  lifecycle?: McpLifecycle,
 ): Promise<void> {
+  // Start the lifecycle (e.g. begin watching) before connecting the transport,
+  // so resources are ready by the time the first request arrives.
+  await lifecycle?.start();
+
   const server = buildUsageMcpServer(service);
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+
+  const shutdown = async (): Promise<void> => {
+    await server.close();
+    await lifecycle?.close();
+  };
+
+  // Tear down the lifecycle alongside the server on a signal or when the
+  // transport finishes (the client closed stdin).
+  const signalHandler = (): void => {
+    void shutdown();
+  };
+  process.once('SIGINT', signalHandler);
+  process.once('SIGTERM', signalHandler);
+  transport.onclose = async () => {
+    process.off('SIGINT', signalHandler);
+    process.off('SIGTERM', signalHandler);
+    await lifecycle?.close();
+  };
 }

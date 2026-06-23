@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { access, glob, readFile, realpath, stat } from 'node:fs/promises';
 import { relative } from 'node:path';
+import { watch } from 'chokidar';
 import YAML from 'yaml';
 
 import { atomicWrite } from '../../core/atomic-file.js';
@@ -40,6 +41,12 @@ const sha256 = (data: string): string =>
   createHash('sha256').update(data, 'utf8').digest('hex');
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/;
+
+/** Coalesce rapid FS events into a single `sync()` pass. */
+const WATCH_DEBOUNCE_MS = 200;
+/** Wait for writes to settle before firing a chokidar event. */
+const WATCH_STABILITY_THRESHOLD_MS = 150;
+const WATCH_STABILITY_POLL_MS = 25;
 
 /**
  * Reconciles JoyCode Skills on disk: discovers `SKILL.md` files under each root,
@@ -178,6 +185,69 @@ export class JoyCodeSkillReconciler {
     await atomicWrite(this.stateFile, JSON.stringify(manifest, null, 2) + '\n');
 
     return { instrumented, unchanged, degraded };
+  }
+
+  /**
+   * Watch every root for `SKILL.md` changes and re-run a debounced `sync()`,
+   * so Skills created during a session are instrumented incrementally. The
+   * returned handle clears the pending timer and closes the chokidar watcher,
+   * leaving no open FS handles behind.
+   *
+   * We watch the root directories themselves (rather than a glob matching
+   * `SKILL.md` under each skill directory) because chokidar glob patterns
+   * miss the creation of an intermediate skill
+   * directory that did not exist when watching started. Each event is filtered
+   * to `SKILL.md` paths before scheduling a reconciled pass.
+   */
+  async watch(): Promise<{ close(): Promise<void> }> {
+    // Initial pass: instrument anything that already exists.
+    await this.sync();
+
+    let timer: NodeJS.Timeout | undefined;
+    const schedule = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        void this.sync();
+      }, WATCH_DEBOUNCE_MS);
+    };
+
+    const isSkillFile = (path: string): boolean => path.endsWith('SKILL.md');
+    const watcher = watch(this.roots.map((root) => root.path), {
+      // `SKILL.md` lives exactly one level under a root: `<root>/<skill>/SKILL.md`.
+      depth: 2,
+      ignoreInitial: true,
+      awaitWriteFinish: {
+        stabilityThreshold: WATCH_STABILITY_THRESHOLD_MS,
+        pollInterval: WATCH_STABILITY_POLL_MS,
+      },
+    });
+    watcher
+      .on('add', (path) => {
+        if (isSkillFile(path)) schedule();
+      })
+      .on('change', (path) => {
+        if (isSkillFile(path)) schedule();
+      })
+      .on('unlink', (path) => {
+        if (isSkillFile(path)) schedule();
+      });
+
+    // Wait for the FS backend to finish its initial scan before returning, so
+    // files created immediately after `watch()` resolves are reliably observed.
+    await new Promise<void>((resolve) => {
+      watcher.once('ready', () => resolve());
+    });
+
+    return {
+      async close(): Promise<void> {
+        if (timer) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        await watcher.close();
+      },
+    };
   }
 }
 
