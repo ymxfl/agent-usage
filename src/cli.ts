@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
-import { rmSync } from 'node:fs';
+import { realpathSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { DatabaseSync } from 'node:sqlite';
@@ -953,9 +953,25 @@ export async function runCli(
   }
 }
 
-const isEntrypoint = process.argv[1] !== undefined &&
-  fileURLToPath(import.meta.url) === resolve(process.argv[1]);
+// Symlink-tolerant entrypoint detection: `fileURLToPath(import.meta.url)`
+// resolves symlinks (Node loads the canonical file), while `process.argv[1]`
+// is whatever the caller passed and may still contain symlinks (e.g. `/tmp` on
+// macOS, which links to `/private/tmp`). Comparing them verbatim makes the
+// runtime a silent no-op when invoked via a symlinked path — which is exactly
+// how the JoyCode runtime is launched from `~/.joycode`. Normalize the argv
+// path through realpath so the two sides agree.
+function isMainEntrypoint(): boolean {
+  const argvPath = process.argv[1];
+  if (argvPath === undefined) return false;
+  const invoked = fileURLToPath(import.meta.url);
+  if (invoked === resolve(argvPath)) return true;
+  try {
+    return realpathSync(argvPath) === invoked;
+  } catch {
+    return false;
+  }
+}
 
-if (isEntrypoint) {
+if (isMainEntrypoint()) {
   await runCli();
 }
