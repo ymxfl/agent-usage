@@ -784,7 +784,7 @@ export async function readRuntimeBundle(): Promise<Uint8Array> {
   let lastError: unknown;
   for (const candidate of candidates) {
     try {
-      return readFile(candidate);
+      return await readFile(candidate);
     } catch (error) {
       lastError = error;
     }
