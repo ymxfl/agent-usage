@@ -49,7 +49,15 @@ function block(skillId: string, nl: string): string {
 export function removeAccountingBlock(
   content: string,
 ): { content: string; changed: boolean } {
-  const lines = content.split('\n');
+  // A leading UTF-8 BOM gets glued to the begin-marker line when the file has
+  // no frontmatter (the block lands on line 0). Splitting the whole content on
+  // `\n` and deleting that line would drop the BOM too. Strip it first, do the
+  // whole-line removal, then re-prepend it so removal is BOM-aware and the
+  // BOM survives the round-trip.
+  const bom = content.startsWith(BOM) ? BOM : '';
+  const body = bom ? content.slice(bom.length) : content;
+
+  const lines = body.split('\n');
   let beginLine = -1;
   let endLine = -1;
   for (let index = 0; index < lines.length; index += 1) {
@@ -80,7 +88,7 @@ export function removeAccountingBlock(
 
   const head = lines.slice(0, beginLine);
   const tail = lines.slice(endLine + 1);
-  return { content: head.concat(tail).join('\n'), changed: true };
+  return { content: bom + head.concat(tail).join('\n'), changed: true };
 }
 
 /**

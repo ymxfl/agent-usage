@@ -66,6 +66,24 @@ describe('injectAccountingBlock', () => {
     expect(content).toContain('name: 部署');
   });
 
+  it('BOM with no frontmatter round-trips losslessly', () => {
+    const original = '﻿# plain\nbody\n';
+    const injected = injectAccountingBlock(original, 'joycode:user:x');
+    const removed = removeAccountingBlock(injected.content);
+
+    expect(removed.content).toBe(original);
+    // BOM survives the round-trip (U+FEFF at offset 0).
+    expect(removed.content.charCodeAt(0)).toBe(0xfeff);
+  });
+
+  it('BOM with no frontmatter is idempotent', () => {
+    const once = injectAccountingBlock('﻿# plain\nbody\n', 'joycode:user:x');
+    const twice = injectAccountingBlock(once.content, 'joycode:user:x');
+
+    expect(twice.content).toBe(once.content);
+    expect(twice.changed).toBe(false);
+  });
+
   it('handles non-ASCII (CJK) frontmatter and body', () => {
     const original = '---\nname: 发布\n---\n执行。\n';
     const { content, changed } = injectAccountingBlock(original, 'joycode:cjk');
