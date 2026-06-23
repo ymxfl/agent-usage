@@ -17,8 +17,10 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "chokidar": "^5.0.0",
     "commander": "^15.0.0",
     "stream-json": "^3.4.0",
+    "yaml": "^2.9.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
