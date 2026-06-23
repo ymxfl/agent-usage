@@ -201,4 +201,65 @@ describe('claude adapter end-to-end (real bundle)', () => {
     // Totals should be empty.
     expect(report).toContain('- None');
   });
+
+  it('honors AGENT_USAGE_HOME when it differs from <home>/.agent-usage (no silent data loss)', () => {
+    // Regression: the default Claude adapter used to derive its selection-config
+    // path via a HOME-relative helper, while the hook/report resolved it via
+    // usagePaths() (which honors AGENT_USAGE_HOME). When the user pointed
+    // AGENT_USAGE_HOME elsewhere, the policy never applied and the hook
+    // recorded nothing — silent data loss. Both paths must now agree.
+    const { skill, mcpServer } = readFixtureFacts();
+    const mcpPattern = mcpGlob(mcpServer);
+
+    const home = mkdtempSync(join(tmpdir(), 'claude-e2e-'));
+    if (home === realHome || realHome.startsWith(home)) {
+      throw new Error(`Temp HOME overlaps the real HOME: ${home}`);
+    }
+    tempHomes.push(home);
+    // A NON-default usage home (NOT <home>/.agent-usage) is the crux of this
+    // regression: it must diverge from the hard-coded HOME-relative path.
+    const usageHome = join(home, '.custom-usage');
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      HOME: home,
+      AGENT_USAGE_HOME: usageHome,
+    };
+
+    // Sanity: install still targets the real HOME's .claude (the adapter
+    // installs the plugin under <home>/.claude/skills, independent of the
+    // usage home).
+    const installOut = runCli(['install', 'claude-code'], env);
+    expect(installOut).toContain('success');
+
+    // configure writes the policy; it MUST land in $AGENT_USAGE_HOME so the
+    // hook (which reads via usagePaths()) can find it.
+    const configureOut = runCli(
+      ['configure', 'claude-code', '--native-skill', skill, '--mcp', mcpPattern],
+      env,
+    );
+    expect(configureOut).toContain('configured claude-code selection policy');
+
+    // The policy file must exist under the custom usage home, NOT under
+    // <home>/.agent-usage/config.json.
+    expect(existsSync(join(usageHome, 'config.json'))).toBe(true);
+    expect(existsSync(join(home, '.agent-usage', 'config.json'))).toBe(false);
+
+    // Feed both events through the hook; on the buggy code the empty policy
+    // would silently record nothing.
+    runCli(
+      ['hook', 'claude'],
+      env,
+      readFileSync(fixture('model-skill-success.json'), 'utf8'),
+    );
+    runCli(
+      ['hook', 'claude'],
+      env,
+      readFileSync(fixture('mcp-success.json'), 'utf8'),
+    );
+
+    // The recorded events actually appear in the report.
+    const report = runCli(['report', 'today'], env);
+    expect(report).toContain(skill);
+    expect(report).toContain(mcpServer);
+  });
 });

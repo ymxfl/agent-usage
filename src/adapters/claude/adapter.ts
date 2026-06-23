@@ -16,6 +16,7 @@ import type {
 } from '../types.js';
 import { atomicWrite } from '../../core/atomic-file.js';
 import { stableSkillId } from '../../core/identity.js';
+import { usagePaths } from '../../core/paths.js';
 import {
   loadSelectionConfig,
   saveSelectionConfig,
@@ -807,11 +808,12 @@ export async function defaultClaudeAdapter(): Promise<AgentAdapter | undefined> 
   }
   return createClaudeAdapter({
     home: homedir(),
-    selectionConfigPath: selectionConfigPathForHome(homedir()),
+    // Resolve the selection-config path through usagePaths() so it honors
+    // AGENT_USAGE_HOME exactly like `hook claude` and `report` do. Hard-coding
+    // <home>/.agent-usage here would diverge when the user points
+    // AGENT_USAGE_HOME elsewhere, causing silent data loss (the policy would be
+    // written where the hook never reads it).
+    selectionConfigPath: usagePaths().config,
     runtimeBundle,
   });
-}
-
-function selectionConfigPathForHome(home: string): string {
-  return join(home, '.agent-usage', 'config.json');
 }

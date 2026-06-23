@@ -57,18 +57,30 @@ export function hasManagedBlock(content: string): boolean {
  * A frontmatter block is recognized iff the first line is exactly `---` and a
  * subsequent line is exactly `---`. A later `---` (e.g. a Markdown horizontal
  * rule) is treated as body content.
+ *
+ * The opening delimiter may use either LF (`---\n`) or CRLF (`---\r\n`) line
+ * endings — a CRLF-encoded `SKILL.md` must keep its frontmatter at the very
+ * top. The detected terminator is used consistently for the returned prefix so
+ * the round-trip stays lossless.
  */
 function splitFrontmatter(content: string): { frontmatter: string; body: string } {
-  if (!content.startsWith('---\n')) {
+  // Detect the line terminator on the opening delimiter once. LF content keeps
+  // the original behavior; CRLF content (Windows-saved files) is recognized so
+  // the managed block lands after the closing delimiter instead of at the top.
+  const isCrlf = content.startsWith('---\r\n');
+  const opener = isCrlf ? '---\r\n' : '---\n';
+  if (!content.startsWith(opener)) {
     return { frontmatter: '', body: content };
   }
-  const lines = content.split('\n');
+  const lines = content.split(isCrlf ? '\r\n' : '\n');
   // lines[0] === '---'; find the closing delimiter (an exact '---' line).
   for (let index = 1; index < lines.length; index += 1) {
     if (lines[index] === '---') {
       const closingLineIndex = index;
-      const frontmatter = lines.slice(0, closingLineIndex + 1).join('\n') + '\n';
-      const body = lines.slice(closingLineIndex + 1).join('\n');
+      const terminator = isCrlf ? '\r\n' : '\n';
+      const frontmatter =
+        lines.slice(0, closingLineIndex + 1).join(terminator) + terminator;
+      const body = lines.slice(closingLineIndex + 1).join(terminator);
       return { frontmatter, body };
     }
   }
@@ -112,10 +124,15 @@ export function removeManagedBlock(content: string): string {
   // Drop the single blank line the injector adds between the closing
   // frontmatter delimiter (`---`) and the block. We only do this when the
   // pattern is exactly `---\n\n<begin>` so a body paragraph break is never
-  // mistaken for injected padding.
+  // mistaken for injected padding. The closing delimiter may carry a trailing
+  // `\r` on CRLF-encoded files (split on `\n` leaves it attached), so accept
+  // both `---` and `---\r`.
   const beforeBegin = lines[beginLine - 1];
   const beforeBeforeBegin = lines[beginLine - 2];
-  if (beforeBegin === '' && beforeBeforeBegin === '---') {
+  if (
+    beforeBegin === '' &&
+    (beforeBeforeBegin === '---' || beforeBeforeBegin === '---\r')
+  ) {
     beginLine -= 1;
   }
 

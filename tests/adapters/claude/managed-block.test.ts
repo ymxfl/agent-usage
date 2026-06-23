@@ -157,6 +157,29 @@ describe('injectManagedBlock', () => {
     expect(removeManagedBlock(injected)).toBe(original);
     expect(injected.match(/agent-usage:begin v1/g)).toHaveLength(1);
   });
+
+  it('places the block AFTER CRLF frontmatter (not at the top) and round-trips losslessly', () => {
+    // A SKILL.md saved on Windows uses CRLF line endings. The opening
+    // frontmatter delimiter is `---\r\n`, which the splitter must still
+    // recognize so the managed block lands after the closing delimiter.
+    const original = '---\r\ntitle: Demo\r\n---\r\n# My Skill\r\n\r\nBody.\r\n';
+    const injected = injectManagedBlock(original, 'a:b:c');
+
+    // Frontmatter stays at the very top (still starts with `---\r\n`).
+    expect(injected.startsWith('---\r\n')).toBe(true);
+    // The block must NOT be at the very top: it appears after the closing
+    // frontmatter delimiter.
+    expect(injected.startsWith(accountingBlock('a:b:c'))).toBe(false);
+    // The block is present somewhere after the frontmatter.
+    expect(hasManagedBlock(injected)).toBe(true);
+    // The injected content preserves the CRLF body intact.
+    expect(injected).toContain('# My Skill\r\n\r\nBody.\r\n');
+    // Exactly one managed block region.
+    expect(injected.match(/agent-usage:begin v1/g)).toHaveLength(1);
+
+    // Lossless round-trip back to the original CRLF content.
+    expect(removeManagedBlock(injected)).toBe(original);
+  });
 });
 
 describe('removeManagedBlock', () => {
