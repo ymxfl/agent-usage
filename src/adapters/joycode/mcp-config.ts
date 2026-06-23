@@ -37,8 +37,14 @@ const ACCOUNTING_SERVER = 'usage-stats';
 /**
  * Deterministic JSON serialization so structurally-equal entries always produce
  * the same hash regardless of key insertion order. Recursively sorts object keys.
+ *
+ * Exported as the single source of truth for MCP-config hashing so the adapter's
+ * per-entry wrapping and the uninstall restore path share one serializer: a
+ * future edit here changes both sides in lockstep, keeping the round-trip
+ * (`instrument` -> `restore`) structurally correct rather than correct by
+ * convention.
  */
-function stableSerialize(value: unknown): string {
+export function stableSerialize(value: unknown): string {
   if (Array.isArray(value)) {
     return `[${value.map(stableSerialize).join(',')}]`;
   }
@@ -52,8 +58,17 @@ function stableSerialize(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function hashEntry(entry: JoyCodeMcpEntry): string {
+/**
+ * SHA-256 of the {@link stableSerialize} form of an entry. Shared hashing so the
+ * adapter and restore agree on what "this entry was modified since
+ * instrumentation" means.
+ */
+export function hashMcpEntry(entry: JoyCodeMcpEntry): string {
   return createHash('sha256').update(stableSerialize(entry)).digest('hex');
+}
+
+function hashEntry(entry: JoyCodeMcpEntry): string {
+  return hashMcpEntry(entry);
 }
 
 function deepClone<T>(value: T): T {

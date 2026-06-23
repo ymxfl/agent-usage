@@ -250,6 +250,72 @@ describe('uninstall', () => {
   });
 });
 
+describe('cross-module MCP round-trip parity (adapter wrap -> restoreJoyCodeMcpConfig)', () => {
+  it('a config wrapped by the adapter restores to the original via restoreJoyCodeMcpConfig', async () => {
+    const { restoreJoyCodeMcpConfig } = await import(
+      '../../../src/adapters/joycode/mcp-config.js'
+    );
+    const { adapter, home, paths, usageStateDir } = makeFixture();
+    await mkdir(join(home, '.joycode'), { recursive: true });
+
+    const original = {
+      unrelated: true,
+      mcpServers: {
+        github: { command: 'npx', args: ['gh-mcp'], env: { ROOT: '/x' } },
+        remote: { url: 'https://example.test/mcp' },
+      },
+    };
+    await writeFile(paths.userMcp, JSON.stringify(original));
+
+    // The adapter wraps github (selection-aware) and persists the manifest whose
+    // hashing is its OWN. restoreJoyCodeMcpConfig (used by uninstall) hashes via
+    // mcp-config.ts's separate serializer. This pins their parity.
+    await adapter.install('user');
+    const configureResults = await adapter.configure({
+      skills: { native_hook: [], injected_mcp: [] },
+      mcp: ['github'],
+    });
+    expect(resultsNonFailed(configureResults)).toBe(true);
+
+    const wrapped = JSON.parse(await readFile(paths.userMcp, 'utf8'));
+    const manifestPath = join(usageStateDir, 'joycode-mcp-manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+
+    const restored = restoreJoyCodeMcpConfig(
+      wrapped,
+      manifest,
+    );
+    expect(restored).toEqual(original);
+  });
+
+  it('restoreJoyCodeMcpConfig throws for an entry the adapter wrapped but a user later edited', async () => {
+    const { restoreJoyCodeMcpConfig } = await import(
+      '../../../src/adapters/joycode/mcp-config.js'
+    );
+    const { adapter, home, paths, usageStateDir } = makeFixture();
+    await mkdir(join(home, '.joycode'), { recursive: true });
+    await writeFile(
+      paths.userMcp,
+      JSON.stringify({ mcpServers: { github: { command: 'npx', args: ['gh'] } } }),
+    );
+
+    await adapter.install('user');
+    await adapter.configure({
+      skills: { native_hook: [], injected_mcp: [] },
+      mcp: ['github'],
+    });
+
+    const wrapped = JSON.parse(await readFile(paths.userMcp, 'utf8')) as {
+      mcpServers: { github: { args: string[] } };
+    };
+    wrapped.mcpServers.github.args.push('user-edit');
+    const manifestPath = join(usageStateDir, 'joycode-mcp-manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+
+    expect(() => restoreJoyCodeMcpConfig(wrapped, manifest)).toThrow(/github/);
+  });
+});
+
 function resultsNonFailed(results: { status: string }[]): boolean {
   return results.every((result) => result.status !== 'failed');
 }

@@ -24,6 +24,7 @@ import type {
   SelectionConfig,
 } from '../src/core/selection.js';
 import type { UsageMcpService } from '../src/mcp/service.js';
+import type { McpLifecycle } from '../src/mcp/server.js';
 import type {
   StdioProtocolObserver,
   StdioProxyOptions,
@@ -904,7 +905,9 @@ describe('report', () => {
 
 describe('mcp and proxy', () => {
   it('dispatches MCP service without opening real stdio and closes the DB', async () => {
-    const runMcpServer = vi.fn(async (_service: UsageMcpService) => {});
+    const runMcpServer = vi.fn(
+      async (_service: UsageMcpService, _lifecycle?: McpLifecycle) => {},
+    );
     const close = vi.fn<() => void>();
     const fixture = runtimeFixture({ runMcpServer });
     fixture.runtime.openDatabase = (path) => {
@@ -926,6 +929,26 @@ describe('mcp and proxy', () => {
 
     expect(runMcpServer).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
+    // No adapter registered for "codex": no lifecycle is passed (backward compat).
+    expect(runMcpServer.mock.calls[0]?.[1]).toBeUndefined();
+  });
+
+  it('does not pass a lifecycle when the adapter omits createMcpLifecycle', async () => {
+    const runMcpServer = vi.fn(
+      async (_service: UsageMcpService, _lifecycle?: McpLifecycle) => {},
+    );
+    const fixture = runtimeFixture({ runMcpServer });
+    const adapter = fakeAdapter('codex');
+    // fakeAdapter has no createMcpLifecycle — the command must skip the lifecycle.
+
+    await parse(
+      registryWith(adapter),
+      fixture.runtime,
+      ['mcp', '--agent', 'codex'],
+    );
+
+    expect(runMcpServer).toHaveBeenCalledOnce();
+    expect(runMcpServer.mock.calls[0]?.[1]).toBeUndefined();
   });
 
   it('passes split command arguments, cwd/env, and child exit code to proxy', async () => {

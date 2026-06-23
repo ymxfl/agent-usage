@@ -19,6 +19,7 @@ import type {
 } from '../types.js';
 import { atomicWrite } from '../../core/atomic-file.js';
 import { stableSkillId } from '../../core/identity.js';
+import type { McpLifecycle } from '../../mcp/server.js';
 import { usagePaths } from '../../core/paths.js';
 import {
   loadSelectionConfig,
@@ -33,12 +34,14 @@ import {
   removeAccountingBlock,
 } from './skill-file.js';
 import {
+  hashMcpEntry,
   instrumentJoyCodeMcpConfig,
   restoreJoyCodeMcpConfig,
   type JoyCodeMcpConfig,
   type JoyCodeMcpEntry,
   type JoyCodeMcpManifest,
 } from './mcp-config.js';
+import { JoyCodeSkillReconciler } from './reconciler.js';
 import { joyCodePaths } from './paths.js';
 import { USAGE_PROMPT_LABEL, usagePrompt, usageSkill } from './prompt-config.js';
 import {
@@ -507,7 +510,7 @@ export function createJoyCodeAdapter(
         if (selected) continue; // still selected: re-wrap below.
         if (current === undefined) continue; // already gone.
         const expected = priorManifest.managedHashes[name];
-        const hash = stableHash(current);
+        const hash = hashMcpEntry(current);
         if (expected !== undefined && hash !== expected) {
           results.push(
             degraded(
@@ -529,7 +532,7 @@ export function createJoyCodeAdapter(
       if (!selected) continue;
       if (isAlreadyWrapped(entry, runtimePath)) {
         // Already wrapped: keep tracking it.
-        managedHashes[name] = stableHash(entry);
+        managedHashes[name] = hashMcpEntry(entry);
         if (priorManifest?.originals[name] !== undefined) {
           originals[name] = priorManifest.originals[name];
         }
@@ -538,7 +541,7 @@ export function createJoyCodeAdapter(
       originals[name] = { ...entry };
       const wrapped = wrapEntry(entry, runtimePath, name);
       servers[name] = wrapped;
-      managedHashes[name] = stableHash(wrapped);
+      managedHashes[name] = hashMcpEntry(wrapped);
     }
 
     // Carry over originals for still-wrapped servers we did not touch this pass.
@@ -550,7 +553,7 @@ export function createJoyCodeAdapter(
         if (priorManifest.originals[name] !== undefined) {
           originals[name] = priorManifest.originals[name];
           managedHashes[name] =
-            managedHashes[name] ?? stableHash(entry);
+            managedHashes[name] ?? hashMcpEntry(entry);
         }
       }
     }
@@ -979,6 +982,34 @@ export function createJoyCodeAdapter(
     return results;
   }
 
+  /**
+   * Build the live-session MCP lifecycle: a skill watcher over the user + project
+   * skill roots (delivering the advertised `skillWatching` capability) whose
+   * `start()` runs an initial `sync()` + arms the debounced watcher, and whose
+   * `close()` clears the watcher handle (no leaked FS handles). The reconciler
+   * writes the same skill manifest used by sync/uninstall, so skills created or
+   * edited during a JoyCode MCP session are re-instrumented incrementally.
+   */
+  async function adapterCreateMcpLifecycle(): Promise<McpLifecycle | undefined> {
+    const reconciler = new JoyCodeSkillReconciler({
+      roots: [
+        { path: paths.userSkills, scope: 'user' },
+        { path: paths.projectSkills, scope: 'project' },
+      ],
+      stateFile: skillManifestPath,
+    });
+    let handle: { close(): Promise<void> } | undefined;
+    return {
+      async start(): Promise<void> {
+        handle = await reconciler.watch();
+      },
+      async close(): Promise<void> {
+        await handle?.close();
+        handle = undefined;
+      },
+    };
+  }
+
   async function adapterHealth(): Promise<CoverageReport> {
     const runtimePresent = existsSync(runtimePath);
     if (!runtimePresent) {
@@ -1043,6 +1074,7 @@ export function createJoyCodeAdapter(
     repair: adapterRepair,
     uninstall: adapterUninstall,
     health: adapterHealth,
+    createMcpLifecycle: adapterCreateMcpLifecycle,
   };
 }
 
@@ -1097,24 +1129,6 @@ function unresolvedPatterns(
         !serverNames.some((name) => patternMatches(pattern, name)),
     )
     .sort();
-}
-
-function stableHash(entry: JoyCodeMcpEntry): string {
-  return createHash('sha256').update(stableSerialize(entry)).digest('hex');
-}
-
-function stableSerialize(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableSerialize).join(',')}]`;
-  }
-  if (value !== null && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record)
-      .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
-      .join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
 
 /**

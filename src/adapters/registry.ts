@@ -21,6 +21,11 @@ export class AdapterRegistry {
     throw new Error(`Unknown adapter "${id}". ${suffix}`);
   }
 
+  /** Non-throwing lookup; returns `undefined` when no adapter is registered. */
+  tryGet(id: string): AgentAdapter | undefined {
+    return this.#adapters.get(id);
+  }
+
   list(): AgentAdapter[] {
     return [...this.#adapters.values()];
   }

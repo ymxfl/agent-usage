@@ -47,7 +47,7 @@ import {
   type SelectionConfig,
   type SkillMode,
 } from './core/selection.js';
-import { runUsageMcpServer } from './mcp/server.js';
+import { runUsageMcpServer, type McpLifecycle } from './mcp/server.js';
 import {
   UsageMcpService,
   type UsageMcpRepository,
@@ -77,7 +77,7 @@ export interface CliRuntime {
   loadSelectionConfig(path: string): Promise<SelectionConfig>;
   openDatabase(path: string): CliDatabase;
   createRepository(database: CliDatabase): CliRepository;
-  runMcpServer(service: UsageMcpService): Promise<void>;
+  runMcpServer(service: UsageMcpService, lifecycle?: McpLifecycle): Promise<void>;
   runProxy(
     command: string,
     args: readonly string[],
@@ -660,7 +660,15 @@ export function createProgram(
           runtime.randomId(),
           runtime.logger,
         );
-        await runtime.runMcpServer(service);
+        // If the adapter for this agent exposes an MCP lifecycle (e.g. JoyCode's
+        // skill watcher), wire it into the session so the advertised capability
+        // is delivered. Adapters without one (Claude, unknown) get none.
+        let lifecycle: McpLifecycle | undefined;
+        const adapter = registry.tryGet(options.agent);
+        if (adapter !== undefined) {
+          lifecycle = await adapter.createMcpLifecycle?.();
+        }
+        await runtime.runMcpServer(service, lifecycle);
       } finally {
         database.close();
       }
