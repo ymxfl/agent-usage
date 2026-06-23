@@ -20,6 +20,7 @@ import type {
   OperationResult,
   Scope,
 } from './adapters/types.js';
+import { defaultClaudeAdapter } from './adapters/claude/adapter.js';
 import {
   consumeClaudeHook,
   type ClaudeNormalizerDependencies,
@@ -913,14 +914,30 @@ function errorMessage(message: string, error: unknown): string {
   return `${message}: ${error instanceof Error ? error.message : String(error)}`;
 }
 
+/**
+ * Build the default adapter registry used when the caller does not supply one.
+ * The real Claude Code adapter is registered against the current user HOME and
+ * the built runtime bundle; if the runtime bundle is unavailable (e.g. running
+ * from source before a build) the registry is returned empty so the rest of the
+ * CLI still functions. Tests always pass an explicit registry, so they are
+ * unaffected by this default wiring.
+ */
+async function defaultRegistry(): Promise<AdapterRegistry> {
+  const registry = new AdapterRegistry();
+  const claude = await defaultClaudeAdapter();
+  if (claude !== undefined) registry.register(claude);
+  return registry;
+}
+
 export async function runCli(
   argv: readonly string[] = process.argv,
-  registry: AdapterRegistry = new AdapterRegistry(),
+  registry?: AdapterRegistry,
   runtimeOverrides: Partial<CliRuntime> = {},
 ): Promise<void> {
   const runtime = resolveRuntime(runtimeOverrides);
+  const resolved = registry ?? (await defaultRegistry());
   try {
-    await createProgram(registry, runtime).parseAsync([...argv]);
+    await createProgram(resolved, runtime).parseAsync([...argv]);
   } catch (error) {
     if (error instanceof CommanderError) {
       if (error.exitCode !== 0) runtime.setExitCode(error.exitCode);
