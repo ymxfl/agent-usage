@@ -149,7 +149,7 @@ function defaultRuntime(): CliRuntime {
     },
     appendError: async (path, message) => {
       await mkdir(dirname(path), { recursive: true });
-      await appendFile(path, `${message}\n`);
+      await appendFile(path, `${new Date().toISOString()} ${message}\n`);
     },
   };
 }
@@ -897,10 +897,14 @@ async function runClaudeHookCommand(runtime: CliRuntime): Promise<void> {
     try {
       database?.close();
     } catch (error) {
-      await runtime.appendError(
-        paths.errors,
-        errorMessage('Failed to close Claude hook database', error),
-      );
+      try {
+        await runtime.appendError(
+          paths.errors,
+          errorMessage('Failed to close Claude hook database', error),
+        );
+      } catch {
+        // Best-effort cleanup logging; never let it escape the hook.
+      }
     }
   }
 }

@@ -5,6 +5,7 @@ import {
   selectedSkillMode,
   type AgentSelectionPolicy,
   type SelectionConfig,
+  type SkillMode,
 } from '../../core/selection.js';
 import {
   normalizeClaudeHook,
@@ -69,7 +70,7 @@ export async function consumeClaudeHook(
 
   let shouldRecord: boolean;
   if (event.kind === 'skill_invocation') {
-    let mode;
+    let mode: SkillMode | undefined;
     try {
       mode = selectedSkillMode(policy, event.name);
     } catch (error) {
