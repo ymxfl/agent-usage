@@ -21,6 +21,7 @@ import type {
   Scope,
 } from './adapters/types.js';
 import { defaultClaudeAdapter } from './adapters/claude/adapter.js';
+import { defaultJoyCodeAdapter } from './adapters/joycode/adapter.js';
 import {
   consumeClaudeHook,
   type ClaudeNormalizerDependencies,
@@ -926,6 +927,8 @@ async function defaultRegistry(): Promise<AdapterRegistry> {
   const registry = new AdapterRegistry();
   const claude = await defaultClaudeAdapter();
   if (claude !== undefined) registry.register(claude);
+  const joycode = await defaultJoyCodeAdapter();
+  if (joycode !== undefined) registry.register(joycode);
   return registry;
 }
 
