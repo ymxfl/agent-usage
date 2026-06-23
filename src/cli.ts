@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { appendFile, mkdir } from 'node:fs/promises';
 import { rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +20,10 @@ import type {
   OperationResult,
   Scope,
 } from './adapters/types.js';
+import {
+  consumeClaudeHook,
+  type ClaudeNormalizerDependencies,
+} from './adapters/claude/hook-command.js';
 import { openUsageDatabase } from './core/database.js';
 import type { UsageEvent } from './core/event.js';
 import { usagePaths, type UsagePaths } from './core/paths.js';
@@ -88,6 +93,8 @@ export interface CliRuntime {
   confirm(message: string): Promise<boolean>;
   purgeData(paths: UsagePaths): void;
   logger: McpProtocolLogger;
+  readStdin(): Promise<string>;
+  appendError(path: string, message: string): Promise<void>;
 }
 
 const namedRanges = ['today', '7d', '30d', 'all'] as const;
@@ -133,6 +140,17 @@ function defaultRuntime(): CliRuntime {
     },
     purgeData: (paths) => rmSync(paths.root, { recursive: true, force: true }),
     logger: console,
+    readStdin: async () => {
+      let buffer = '';
+      for await (const chunk of process.stdin) {
+        buffer += chunk.toString();
+      }
+      return buffer;
+    },
+    appendError: async (path, message) => {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${message}\n`);
+    },
   };
 }
 
@@ -839,7 +857,56 @@ export function createProgram(
       },
     );
 
+  program
+    .command('hook claude', { hidden: true })
+    .action(async () => {
+      await runClaudeHookCommand(runtime);
+    });
+
   return program;
+}
+
+async function runClaudeHookCommand(runtime: CliRuntime): Promise<void> {
+  const paths = runtime.paths();
+  const text = await runtime.readStdin();
+
+  let database: CliDatabase | undefined;
+  let repository: CliRepository | undefined;
+  const normalizerDependencies: ClaudeNormalizerDependencies = {
+    now: () => new Date(),
+    randomUUID,
+  };
+
+  const logError = (message: string, error: unknown): Promise<void> =>
+    runtime.appendError(paths.errors, errorMessage(message, error));
+
+  try {
+    await consumeClaudeHook(text, {
+      loadSelectionConfig: () => runtime.loadSelectionConfig(paths.config),
+      insert: (event) => {
+        if (database === undefined) {
+          database = runtime.openDatabase(paths.database);
+          repository = runtime.createRepository(database);
+        }
+        return repository!.insert(event);
+      },
+      logError,
+      normalizerDependencies,
+    });
+  } finally {
+    try {
+      database?.close();
+    } catch (error) {
+      await runtime.appendError(
+        paths.errors,
+        errorMessage('Failed to close Claude hook database', error),
+      );
+    }
+  }
+}
+
+function errorMessage(message: string, error: unknown): string {
+  return `${message}: ${error instanceof Error ? error.message : String(error)}`;
 }
 
 export async function runCli(

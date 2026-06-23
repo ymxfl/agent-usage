@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -176,6 +176,164 @@ async function parse(
     ['node', 'agent-usage', ...args],
   );
 }
+
+const directClaudeHook = JSON.stringify({
+  session_id: 'session-cli-hook',
+  transcript_path: '/private/transcript.jsonl',
+  cwd: '/work/payments-api',
+  permission_mode: 'default',
+  hook_event_name: 'UserPromptExpansion',
+  expansion_type: 'slash_command',
+  command_name: 'release-review',
+  command_args: 'secret arguments',
+  command_source: 'skill',
+  prompt: 'sensitive expanded prompt',
+});
+
+describe('hidden Claude hook command', () => {
+  it('lazily opens, inserts, and closes for a selected event', async () => {
+    const close = vi.fn();
+    const insert = vi.fn(() => true);
+    const openDatabase = vi.fn<CliRuntime['openDatabase']>(() => ({ close }));
+    const fixture = runtimeFixture({
+      readStdin: async () => directClaudeHook,
+      loadSelectionConfig: async () =>
+        selectionConfig({
+          'claude-code': {
+            skills: {
+              native_hook: ['release-review'],
+              injected_mcp: [],
+            },
+            mcp: [],
+          },
+        }),
+      openDatabase,
+      createRepository: () => ({ insert } as never),
+      appendError: vi.fn(async () => {}),
+    });
+
+    await parse(new AdapterRegistry(), fixture.runtime, ['hook', 'claude']);
+
+    expect(openDatabase).toHaveBeenCalledWith(join(fixture.root, 'usage.db'));
+    expect(insert).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(fixture.stdout).toEqual([]);
+    expect(fixture.exitCodes).toEqual([]);
+  });
+
+  it.each([
+    ['malformed input', '{bad json', selectionConfig()],
+    ['empty policy', directClaudeHook, selectionConfig()],
+  ])('keeps %s fail-open without opening the database', async (_name, input, config) => {
+    const openDatabase = vi.fn<CliRuntime['openDatabase']>(() => ({
+      close: vi.fn(),
+    }));
+    const fixture = runtimeFixture({
+      readStdin: async () => input,
+      loadSelectionConfig: async () => config,
+      openDatabase,
+      appendError: vi.fn(async () => {}),
+    });
+
+    await parse(new AdapterRegistry(), fixture.runtime, ['hook', 'claude']);
+
+    expect(openDatabase).not.toHaveBeenCalled();
+    expect(fixture.stdout).toEqual([]);
+    expect(fixture.exitCodes).toEqual([]);
+  });
+
+  it.each(['open', 'repository', 'insert'])('swallows %s failures', async (failure) => {
+    const database = { close: vi.fn() };
+    const fixture = runtimeFixture({
+      readStdin: async () => directClaudeHook,
+      loadSelectionConfig: async () =>
+        selectionConfig({
+          'claude-code': {
+            skills: {
+              native_hook: ['release-review'],
+              injected_mcp: [],
+            },
+            mcp: [],
+          },
+        }),
+      openDatabase: () => {
+        if (failure === 'open') throw new Error('open failed');
+        return database;
+      },
+      createRepository: () => {
+        if (failure === 'repository') throw new Error('repository failed');
+        return {
+          insert: () => {
+            if (failure === 'insert') throw new Error('insert failed');
+            return true;
+          },
+        } as never;
+      },
+      appendError: vi.fn(async () => {}),
+    });
+
+    await expect(
+      parse(new AdapterRegistry(), fixture.runtime, ['hook', 'claude']),
+    ).resolves.toBeUndefined();
+    expect(fixture.stdout).toEqual([]);
+    expect(fixture.exitCodes).toEqual([]);
+  });
+
+  it('swallows and logs database close failures', async () => {
+    const appendError = vi.fn(async () => {});
+    const fixture = runtimeFixture({
+      readStdin: async () => directClaudeHook,
+      loadSelectionConfig: async () =>
+        selectionConfig({
+          'claude-code': {
+            skills: {
+              native_hook: ['release-review'],
+              injected_mcp: [],
+            },
+            mcp: [],
+          },
+        }),
+      openDatabase: () => ({
+        close: () => {
+          throw new Error('close failed');
+        },
+      }),
+      createRepository: () => ({ insert: () => true } as never),
+      appendError,
+    });
+
+    await expect(
+      parse(new AdapterRegistry(), fixture.runtime, ['hook', 'claude']),
+    ).resolves.toBeUndefined();
+    expect(appendError).toHaveBeenCalledWith(
+      join(fixture.root, 'errors.log'),
+      expect.stringContaining('Failed to close Claude hook database'),
+    );
+    expect(fixture.stdout).toEqual([]);
+    expect(fixture.exitCodes).toEqual([]);
+  });
+
+  it('uses the default best-effort error appender with parent creation', async () => {
+    const fixture = runtimeFixture({
+      paths: () => ({
+        root: fixture.root,
+        config: join(fixture.root, 'config.json'),
+        database: join(fixture.root, 'usage.db'),
+        state: join(fixture.root, 'state'),
+        errors: join(fixture.root, 'nested', 'logs', 'errors.log'),
+      }),
+      readStdin: async () => '{bad json',
+    });
+
+    await parse(new AdapterRegistry(), fixture.runtime, ['hook', 'claude']);
+
+    expect(
+      readFileSync(join(fixture.root, 'nested', 'logs', 'errors.log'), 'utf8'),
+    ).toContain('Failed to consume Claude hook');
+    expect(fixture.stdout).toEqual([]);
+    expect(fixture.exitCodes).toEqual([]);
+  });
+});
 
 describe('target selection commands', () => {
   it('lists user and project Skills and MCP for only the selected adapter', async () => {
