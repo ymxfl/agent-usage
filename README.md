@@ -1,5 +1,7 @@
 # agent-usage
 
+**English** | [简体中文](README.zh-CN.md)
+
 **Local-first usage statistics for coding agents.**
 
 `agent-usage` records how often a coding agent loads Skills and calls MCP tools, then
