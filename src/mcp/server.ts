@@ -1,3 +1,5 @@
+import { Readable, Writable } from 'node:stream';
+
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -120,33 +122,66 @@ export interface McpLifecycle {
   close(): Promise<void>;
 }
 
+export interface McpServerTransportOptions {
+  /**
+   * Streams the stdio transport reads from / writes to. Defaults to
+   * `process.stdin` / `process.stdout`; injected in tests so a full session can
+   * be driven in-process over `PassThrough` streams.
+   */
+  stdin?: Readable;
+  stdout?: Writable;
+}
+
 export async function runUsageMcpServer(
   service: UsageMcpService,
   lifecycle?: McpLifecycle,
+  options: McpServerTransportOptions = {},
 ): Promise<void> {
   // Start the lifecycle (e.g. begin watching) before connecting the transport,
   // so resources are ready by the time the first request arrives.
   await lifecycle?.start();
 
   const server = buildUsageMcpServer(service);
-  const transport = new StdioServerTransport();
+  const stdin = options.stdin ?? process.stdin;
+  const stdout = options.stdout ?? process.stdout;
+  const transport = new StdioServerTransport(stdin, stdout);
   await server.connect(transport);
 
-  const shutdown = async (): Promise<void> => {
-    await server.close();
-    await lifecycle?.close();
-  };
+  // `server.connect` resolves the moment the transport begins listening — it
+  // does NOT wait for the session to end (the SDK's StdioServerTransport only
+  // invokes `onclose` from its own `close()`, never on stdin EOF). Block here
+  // until the session actually finishes (the client disconnects stdin, or a
+  // shutdown signal arrives) so callers can keep shared resources — notably
+  // the open usage database — alive for the whole session. Without this, the
+  // CLI's `finally { database.close() }` would run immediately after connect,
+  // finalizing the prepared INSERT statement before any tool call and breaking
+  // every record_skill with "statement has been finalized".
+  await waitForSessionEnd(stdin, server);
 
-  // Tear down the lifecycle alongside the server on a signal or when the
-  // transport finishes (the client closed stdin).
-  const signalHandler = (): void => {
-    void shutdown();
-  };
-  process.once('SIGINT', signalHandler);
-  process.once('SIGTERM', signalHandler);
-  transport.onclose = async () => {
-    process.off('SIGINT', signalHandler);
-    process.off('SIGTERM', signalHandler);
-    await lifecycle?.close();
-  };
+  await lifecycle?.close();
+}
+
+/**
+ * Resolve once the MCP session ends: the client disconnected (stdin EOF) or a
+ * shutdown signal was received. Removes its own listeners and closes the server
+ * (and thus the transport) deterministically before resolving.
+ */
+function waitForSessionEnd(stdin: Readable, server: McpServer): Promise<void> {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      process.off('SIGINT', finish);
+      process.off('SIGTERM', finish);
+      stdin.off('end', finish);
+      // Close the server before resolving so the transport is torn down
+      // deterministically. Resolve regardless so a failed close can't hang the
+      // process.
+      void server.close().finally(resolve);
+    };
+    process.once('SIGINT', finish);
+    process.once('SIGTERM', finish);
+    stdin.once('end', finish);
+  });
 }
