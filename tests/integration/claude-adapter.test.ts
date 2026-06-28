@@ -154,7 +154,7 @@ describe('claude adapter end-to-end (real bundle)', () => {
     runCli(['hook', 'claude'], env, mcpPayload);
 
     // 5. report reflects BOTH recorded events.
-    const report = runCli(['report', 'today'], env);
+    const report = runCli(['--lang', 'en', 'report', 'today'], env);
 
     // Core assertions: the Skill name and the MCP server both appear.
     expect(report).toContain(skill);
@@ -166,12 +166,14 @@ describe('claude adapter end-to-end (real bundle)', () => {
     expect(report).toContain('mcp_call');
 
     // The MCP row names the qualified tool and shows exactly one attempt.
-    expect(report).toContain('1 attempt');
+    expect(report).toMatch(
+      /\| claude-code \| [^|]+ \| 1 \| 1 \| 0 \| 0 \| \d+ ms \|/,
+    );
 
     // No over-recording: both the success and failure MCP fixtures would share
     // the same tool_use_id, but only the selected success fixture was fed, so
     // there must be exactly one attempt and no failures.
-    expect(report).toContain('failure 0');
+    expect(report).toContain('| 1 | 1 | 0 | 0 |');
   });
 
   it('does not record events when no selection policy is configured (opt-in)', () => {
@@ -193,13 +195,13 @@ describe('claude adapter end-to-end (real bundle)', () => {
       readFileSync(fixture('mcp-success.json'), 'utf8'),
     );
 
-    const report = runCli(['report', 'today'], env);
+    const report = runCli(['--lang', 'en', 'report', 'today'], env);
 
     // Neither the Skill nor the MCP server should appear.
     expect(report).not.toContain(skill);
     expect(report).not.toContain(mcpServer);
     // Totals should be empty.
-    expect(report).toContain('- None');
+    expect(report).toContain('None');
   });
 
   it('honors AGENT_USAGE_HOME when it differs from <home>/.agent-usage (no silent data loss)', () => {
@@ -258,7 +260,7 @@ describe('claude adapter end-to-end (real bundle)', () => {
     );
 
     // The recorded events actually appear in the report.
-    const report = runCli(['report', 'today'], env);
+    const report = runCli(['--lang', 'en', 'report', 'today'], env);
     expect(report).toContain(skill);
     expect(report).toContain(mcpServer);
   });

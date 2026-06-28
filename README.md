@@ -31,13 +31,15 @@ exact and estimated counts into one misleading number.
 | Strategy | What it observes | Evidence | Precision |
 | --- | --- | --- | --- |
 | **Native hooks** (Claude Code) | Exact platform Skill invocations and MCP tool calls through plugin hooks | `native_hook` | `exact` |
-| **Injected MCP accounting** (JoyCode) | A managed instruction that asks the agent to call `record_skill` once per session | `injected_mcp` | `best_effort` |
+| **Injected MCP accounting** (JoyCode) | A managed instruction that asks the agent to call `record_skill` every time an injected Skill is used | `injected_mcp` | `best_effort` |
 | **stdio MCP proxy** (JoyCode) | A transparent JSON-RPC proxy that relays stdio MCP traffic and records attempts, outcomes, and durations | `mcp_proxy` | `exact` |
 
 ### What is counted
 
-- **Skill session loads** (`skill_session_load`) — the portable metric. At most one load
-  per `agent_session + skill_id`, so repeated uses in a session don't inflate the count.
+- **Injected Skill accounting events** (`skill_session_load`) — the portable
+  best-effort metric used by injected adapters. The event name is retained for schema
+  compatibility, but repeated `record_skill` calls are counted when the agent follows
+  the injected instruction.
 - **Skill invocations** (`skill_invocation`) — every native Skill invocation, where the
   adapter supports it (Claude Code).
 - **MCP calls** (`mcp_call`) — each tool request is an attempt with an outcome of
@@ -104,6 +106,16 @@ Useful npm scripts:
 
 All collection is **opt-in**. A fresh install records nothing until you explicitly select
 targets with `configure`.
+
+For day-to-day setup, run the interactive wizard and follow the menus:
+
+```bash
+agent-usage
+```
+
+The wizard lets you choose an operation, choose an agent, and multi-select Skills and
+MCP servers when configuring targets. The explicit commands below remain available for
+scripts and repeatable setup.
 
 ### 1. Install for an agent
 
@@ -198,6 +210,29 @@ MCP
 Coverage warnings
 - Injected MCP skill usage is best-effort and may be incomplete.
 ```
+
+### 5. Webhooks and local web console
+
+You can forward every newly recorded usage event to an HTTP webhook. Duplicate events
+ignored by the local database are not reported again, and webhook failures never block
+the agent.
+
+```bash
+agent-usage webhook set https://example.test/usage
+agent-usage webhook show
+agent-usage webhook unset
+```
+
+For local inspection, start the browser console:
+
+```bash
+agent-usage web
+```
+
+It listens on `http://127.0.0.1:17891` by default. The page can view targets, run common
+install/configure/repair operations, read reports, configure the webhook URL, and set it
+to the built-in local receiver (`/webhook/usage`) so you can watch usage events arrive in
+real time.
 
 ### Lifecycle commands
 
@@ -304,8 +339,9 @@ docs/superpowers/           # design spec and implementation plans
 ## Known limitations
 
 - **JoyCode Skill telemetry is best-effort** — it depends on the model following the
-  injected instruction, and repeated uses of the same Skill in one session count as a
-  single unique load.
+  injected instruction. The instruction requests a `record_skill` call on every Skill
+  use, including repeated uses in one session, but JoyCode can still miss counts if the
+  model reuses cached context or skips the accounting call.
 - **JoyCode remote MCP transports** (HTTP/SSE/Streamable HTTP) are not counted in this
   release; only stdio MCP traffic that traverses the proxy is observed exactly.
 - A **newly created JoyCode Skill can race** with the watcher during the session it is

@@ -2,10 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { realpathSync, rmSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import type { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
+import {
+  checkbox,
+  confirm as inquirerConfirm,
+  input,
+  select,
+} from '@inquirer/prompts';
 import {
   Command,
   CommanderError,
@@ -16,6 +21,7 @@ import { AdapterRegistry } from './adapters/registry.js';
 import type {
   AgentAdapter,
   Capabilities,
+  CoverageReport,
   DiscoveredTargets,
   OperationResult,
   Scope,
@@ -40,13 +46,16 @@ import {
   emptyAgentSelection,
   loadSelectionConfig,
   matchSelectionPattern,
+  saveSelectionConfig,
   selectedMcp,
   selectedSkillMode,
   skillModes,
   type AgentSelectionPolicy,
   type SelectionConfig,
   type SkillMode,
+  emptySelectionConfig,
 } from './core/selection.js';
+import { createWebhookReporter } from './core/webhook.js';
 import { runUsageMcpServer, type McpLifecycle } from './mcp/server.js';
 import {
   UsageMcpService,
@@ -62,7 +71,11 @@ import {
   type StdioProxyOptions,
   type StdioProxyResult,
 } from './proxy/stdio-proxy.js';
-import { renderUsageReportText } from './report/text.js';
+import {
+  renderUsageReportText,
+  type Language,
+} from './report/text.js';
+import { startAgentUsageWebServer } from './web/server.js';
 
 export interface CliDatabase {
   close(): void;
@@ -75,8 +88,12 @@ export interface CliRepository extends UsageMcpRepository {
 export interface CliRuntime {
   paths(): UsagePaths;
   loadSelectionConfig(path: string): Promise<SelectionConfig>;
+  saveSelectionConfig(path: string, config: SelectionConfig): Promise<void>;
   openDatabase(path: string): CliDatabase;
-  createRepository(database: CliDatabase): CliRepository;
+  createRepository(
+    database: CliDatabase,
+    config?: SelectionConfig,
+  ): CliRepository;
   runMcpServer(service: UsageMcpService, lifecycle?: McpLifecycle): Promise<void>;
   runProxy(
     command: string,
@@ -92,6 +109,19 @@ export interface CliRuntime {
   setExitCode(code: number): void;
   signalSelf(signal: NodeJS.Signals): void;
   isTTY(): boolean;
+  language(): Language;
+  prompt(message: string): Promise<string>;
+  select<T extends string>(
+    message: string,
+    choices: Array<ChoiceItem<T>>,
+    defaultValue?: T,
+  ): Promise<T>;
+  multiSelect<T extends string>(
+    message: string,
+    choices: Array<ChoiceItem<T>>,
+    defaults?: readonly T[],
+    manualLabel?: string,
+  ): Promise<T[]>;
   confirm(message: string): Promise<boolean>;
   purgeData(paths: UsagePaths): void;
   logger: McpProtocolLogger;
@@ -106,14 +136,41 @@ const eventKinds = [
   'mcp_call',
 ] as const;
 const scopes = ['user', 'project'] as const;
+const languages = ['zh', 'en'] as const;
+
+function languageFrom(value: string | undefined): Language {
+  return value === 'en' ? 'en' : 'zh';
+}
+
+function isLanguage(value: string): value is Language {
+  return (languages as readonly string[]).includes(value);
+}
+
+function languageChoice(value: string): Language {
+  if (isLanguage(value)) return value;
+  throw new InvalidArgumentError(
+    `invalid language "${value}". Allowed choices are zh, en.`,
+  );
+}
+
+function commandLanguage(command: Command, runtime: CliRuntime): Language {
+  const options = command.optsWithGlobals() as { lang?: Language };
+  return options.lang ?? runtime.language();
+}
 
 function defaultRuntime(): CliRuntime {
   return {
     paths: usagePaths,
     loadSelectionConfig,
+    saveSelectionConfig,
     openDatabase: openUsageDatabase,
-    createRepository: (database) =>
-      new UsageRepository(database as DatabaseSync),
+    createRepository: (database, config) => {
+      const onInsert = createWebhookReporter(config?.webhook, console);
+      return new UsageRepository(
+        database as DatabaseSync,
+        onInsert === undefined ? {} : { onInsert },
+      );
+    },
     runMcpServer: runUsageMcpServer,
     runProxy: runStdioProxy,
     cwd: () => process.cwd(),
@@ -128,18 +185,48 @@ function defaultRuntime(): CliRuntime {
       process.kill(process.pid, signal);
     },
     isTTY: () => process.stdin.isTTY === true && process.stderr.isTTY === true,
-    confirm: async (message) => {
-      const prompt = createInterface({
-        input: process.stdin,
-        output: process.stderr,
+    language: () => languageFrom(process.env.AGENT_USAGE_LANG),
+    prompt: async (message) => input({ message }),
+    select: async (message, choices, defaultValue) =>
+      select({
+        message,
+        default: defaultValue,
+        choices: choices.map((choice) => ({
+          name: choice.label,
+          value: choice.value,
+        })),
+      }),
+    multiSelect: async (message, choices, defaults = [], manualLabel) => {
+      const manualValue = '__manual_input__';
+      const selected = await checkbox<string>({
+        message,
+        choices: [
+          ...choices.map((choice, index) => ({
+            name: `${index + 1}. ${choice.label}`,
+            value: choice.value,
+            checked:
+              defaults.includes(choice.value) || choice.selected === true,
+          })),
+          ...(manualLabel === undefined
+            ? []
+            : [{ name: manualLabel, value: manualValue }]),
+        ],
       });
-      try {
-        const answer = await prompt.question(`${message} [y/N] `);
-        return /^(?:y|yes)$/i.test(answer.trim());
-      } finally {
-        prompt.close();
+      if (!selected.includes(manualValue)) {
+        return choices
+          .map((choice) => choice.value)
+          .filter((value) => selected.includes(value));
       }
+      const answer = await input({
+        message: manualLabel ?? 'Enter numbers separated by comma or space',
+        validate: (value) =>
+          parseMultiSelectAnswer(value, choices) === undefined
+            ? 'Enter numbers, values, all, or none.'
+            : true,
+      });
+      return parseMultiSelectAnswer(answer, choices) ?? [];
     },
+    confirm: async (message) => inquirerConfirm({ message, default: false }),
     purgeData: (paths) => rmSync(paths.root, { recursive: true, force: true }),
     logger: console,
     readStdin: async () => {
@@ -171,6 +258,14 @@ function choice<T extends string>(
   );
 }
 
+function portChoice(value: string): number {
+  const port = Number(value);
+  if (Number.isInteger(port) && port >= 0 && port <= 65535) return port;
+  throw new InvalidArgumentError(
+    `invalid port "${value}". Expected an integer between 0 and 65535.`,
+  );
+}
+
 function selectedAdapter(
   command: Command,
   registry: AdapterRegistry,
@@ -197,9 +292,11 @@ function printResults(
 function printCapabilities(
   capabilities: Capabilities,
   runtime: CliRuntime,
+  language: Language = runtime.language(),
 ): void {
+  const t = cliText[language];
   for (const [name, supported] of Object.entries(capabilities)) {
-    runtime.writeOutput(`  ${name}: ${supported ? 'yes' : 'no'}\n`);
+    runtime.writeOutput(`  ${name}: ${supported ? t.yes : t.no}\n`);
   }
 }
 
@@ -211,19 +308,111 @@ function targetSortKey(scope: Scope, name: string, detail: string): string {
   return `${scope === 'user' ? '0' : '1'}\0${name}\0${detail}`;
 }
 
+const cliText = {
+  en: {
+    colon: ':',
+    valueSeparator: ' ',
+    none: 'none',
+    yes: 'yes',
+    no: 'no',
+    selected: 'selected',
+    noTargets: 'No targets discovered.',
+    skills: 'Skills',
+    unresolved: 'Unresolved patterns',
+    issues: 'Issues',
+    desiredPolicy: 'Desired policy',
+    languagePrompt: 'Select language / 选择语言',
+    selectOperation: 'Select operation',
+    selectAgent: 'Select agent',
+    selectScope: 'Select scope',
+    selectReportRange: 'Select report range',
+    selectNativeSkills: 'Select Skills for native_hook',
+    selectInjectedSkills: 'Select Skills for injected_mcp',
+    selectMcpServers: 'Select MCP servers',
+    manualInput: 'Enter numbers separated by comma or space',
+    noneAvailable: 'none available',
+    applyConfiguration: 'Apply this configuration?',
+    configurationCancelled: 'Configuration cancelled.',
+    requiresTty:
+      'Interactive mode requires a TTY. Use a subcommand for non-interactive use.',
+    noAdapters: 'No adapters are registered.',
+    noAdaptersRegistered: 'No adapters registered',
+    webhookEnabled: 'Webhook enabled',
+    webhookDisabled: 'Webhook disabled',
+    webhookNotConfigured: 'Webhook: none',
+    webhookCurrent: 'Webhook',
+    webListening: 'Web console listening',
+    operationLabels: {
+      install: 'Install adapter files',
+      configure: 'Configure Skill and MCP targets',
+      sync: 'Sync newly discovered targets',
+      repair: 'Repair managed files',
+      uninstall: 'Uninstall adapter files',
+      'list-targets': 'List selectable targets',
+      health: 'Show health',
+      report: 'Show usage report',
+    },
+  },
+  zh: {
+    colon: '：',
+    valueSeparator: '',
+    none: '无',
+    yes: '是',
+    no: '否',
+    selected: '已选',
+    noTargets: '未发现可配置目标。',
+    skills: 'Skills',
+    unresolved: '未匹配的选择模式',
+    issues: '问题',
+    desiredPolicy: '目标配置',
+    languagePrompt: '选择语言 / Select language',
+    selectOperation: '选择操作',
+    selectAgent: '选择 agent',
+    selectScope: '选择配置范围',
+    selectReportRange: '选择报告范围',
+    selectNativeSkills: '选择 native_hook Skills',
+    selectInjectedSkills: '选择 injected_mcp Skills',
+    selectMcpServers: '选择 MCP 服务',
+    manualInput: '输入编号，使用逗号或空格分隔',
+    noneAvailable: '无可选项',
+    applyConfiguration: '应用这个配置？',
+    configurationCancelled: '已取消配置。',
+    requiresTty: '交互模式需要 TTY。非交互使用请指定子命令。',
+    noAdapters: '没有已注册的 adapter。',
+    noAdaptersRegistered: '没有已注册的 adapter',
+    webhookEnabled: 'Webhook 已启用',
+    webhookDisabled: 'Webhook 已停用',
+    webhookNotConfigured: 'Webhook：无',
+    webhookCurrent: 'Webhook',
+    webListening: 'Web 控制台已启动',
+    operationLabels: {
+      install: '安装 adapter 文件',
+      configure: '配置 Skill 和 MCP 目标',
+      sync: '同步新发现的目标',
+      repair: '修复托管文件',
+      uninstall: '卸载 adapter 文件',
+      'list-targets': '列出可选择目标',
+      health: '查看健康状态',
+      report: '查看使用报告',
+    },
+  },
+} as const;
+
 function printTargets(
   targets: DiscoveredTargets,
   runtime: CliRuntime,
+  language: Language = runtime.language(),
 ): void {
+  const t = cliText[language];
   runtime.writeOutput(`${targets.agent}\n`);
   if (targets.skills.length === 0 && targets.mcp.length === 0) {
-    runtime.writeOutput('  No targets discovered.\n');
+    runtime.writeOutput(`  ${t.noTargets}\n`);
   }
 
   if (targets.skills.length === 0) {
-    runtime.writeOutput('  Skills: none\n');
+    runtime.writeOutput(`  ${t.skills}${t.colon}${t.valueSeparator}${t.none}\n`);
   } else {
-    runtime.writeOutput('  Skills:\n');
+    runtime.writeOutput(`  ${t.skills}${t.colon}\n`);
     const skills = [...targets.skills].sort((left, right) =>
       compareText(
         targetSortKey(left.scope, left.name, left.path),
@@ -234,16 +423,17 @@ function printTargets(
       const modes = skill.supportedModes.length === 0
         ? 'none'
         : [...skill.supportedModes].sort(compareText).join(', ');
+      const selected = skill.selectedMode ?? t.none;
       runtime.writeOutput(
-        `  - ${skill.name} [${skill.scope}] ${modes} (selected: ${skill.selectedMode ?? 'none'}) ${skill.path}\n`,
+        `  - ${skill.name} [${skill.scope}] ${modes} (${t.selected}: ${selected}) ${skill.path}\n`,
       );
     }
   }
 
   if (targets.mcp.length === 0) {
-    runtime.writeOutput('  MCP: none\n');
+    runtime.writeOutput(`  MCP${t.colon}${t.valueSeparator}${t.none}\n`);
   } else {
-    runtime.writeOutput('  MCP:\n');
+    runtime.writeOutput(`  MCP${t.colon}\n`);
     const servers = [...targets.mcp].sort((left, right) =>
       compareText(
         targetSortKey(left.scope, left.server, left.transport),
@@ -252,24 +442,24 @@ function printTargets(
     );
     for (const server of servers) {
       runtime.writeOutput(
-        `  - ${server.server} [${server.scope}] ${server.transport} (selected: ${server.selected === true ? 'yes' : 'no'})\n`,
+        `  - ${server.server} [${server.scope}] ${server.transport} (${t.selected}: ${server.selected === true ? t.yes : t.no})\n`,
       );
     }
   }
 
   if (targets.unresolved.length === 0) {
-    runtime.writeOutput('  Unresolved patterns: none\n');
+    runtime.writeOutput(`  ${t.unresolved}${t.colon}${t.valueSeparator}${t.none}\n`);
   } else {
-    runtime.writeOutput('  Unresolved patterns:\n');
+    runtime.writeOutput(`  ${t.unresolved}${t.colon}\n`);
     for (const pattern of [...targets.unresolved].sort(compareText)) {
       runtime.writeOutput(`  - ${pattern}\n`);
     }
   }
 
   if (targets.issues.length === 0) {
-    runtime.writeOutput('  Issues: none\n');
+    runtime.writeOutput(`  ${t.issues}${t.colon}${t.valueSeparator}${t.none}\n`);
   } else {
-    runtime.writeOutput('  Issues:\n');
+    runtime.writeOutput(`  ${t.issues}${t.colon}\n`);
     for (const issue of [...targets.issues].sort(compareText)) {
       runtime.writeOutput(`  - ${issue}\n`);
     }
@@ -279,10 +469,12 @@ function printTargets(
 function printSelectionPolicy(
   policy: AgentSelectionPolicy,
   runtime: CliRuntime,
+  language: Language = runtime.language(),
 ): void {
+  const t = cliText[language];
   const display = (patterns: string[]): string =>
-    patterns.length === 0 ? 'none' : patterns.join(', ');
-  runtime.writeOutput('Desired policy:\n');
+    patterns.length === 0 ? t.none : patterns.join(', ');
+  runtime.writeOutput(`${t.desiredPolicy}${t.colon}\n`);
   runtime.writeOutput(
     `  Skills (native_hook): ${display(policy.skills.native_hook)}\n`,
   );
@@ -290,6 +482,27 @@ function printSelectionPolicy(
     `  Skills (injected_mcp): ${display(policy.skills.injected_mcp)}\n`,
   );
   runtime.writeOutput(`  MCP: ${display(policy.mcp)}\n`);
+}
+
+function printHealth(
+  capabilities: Capabilities,
+  coverage: CoverageReport,
+  runtime: CliRuntime,
+  language: Language = runtime.language(),
+): void {
+  const t = cliText[language];
+  runtime.writeOutput(`${coverage.agent}\n`);
+  printCapabilities(capabilities, runtime, language);
+  runtime.writeOutput(`  Skills${t.colon} ${coverage.skills}\n`);
+  runtime.writeOutput(`  MCP${t.colon} ${coverage.mcp}\n`);
+  if (coverage.issues.length === 0) {
+    runtime.writeOutput(`  ${t.issues}${t.colon} ${t.none}\n`);
+  } else {
+    runtime.writeOutput(`  ${t.issues}${t.colon}\n`);
+    for (const issue of coverage.issues) {
+      runtime.writeOutput(`  - ${issue}\n`);
+    }
+  }
 }
 
 function collectOption(value: string, previous: string[]): string[] {
@@ -305,6 +518,41 @@ interface ConfigureOptions {
   mcp: string[];
   allSkills?: SkillMode;
   allMcp?: boolean;
+}
+
+type WizardOperation =
+  | 'install'
+  | 'configure'
+  | 'sync'
+  | 'repair'
+  | 'uninstall'
+  | 'list-targets'
+  | 'health'
+  | 'report';
+
+interface ChoiceItem<T extends string> {
+  value: T;
+  label: string;
+  selected?: boolean;
+}
+
+const wizardOperationValues: readonly WizardOperation[] = [
+  'install',
+  'configure',
+  'sync',
+  'repair',
+  'uninstall',
+  'list-targets',
+  'health',
+  'report',
+];
+
+function wizardOperations(language: Language): Array<ChoiceItem<WizardOperation>> {
+  const labels = cliText[language].operationLabels;
+  return wizardOperationValues.map((value) => ({
+    value,
+    label: labels[value],
+  }));
 }
 
 function desiredSelectionPolicy(
@@ -351,6 +599,99 @@ function desiredSelectionPolicy(
     skills: { native_hook: nativeHook, injected_mcp: injectedMcp },
     mcp,
   };
+}
+
+function selectionPolicyError(
+  adapter: AgentAdapter,
+  targets: DiscoveredTargets,
+  policy: AgentSelectionPolicy,
+): string | undefined {
+  for (const skill of targets.skills) {
+    let mode: SkillMode | undefined;
+    try {
+      mode = selectedSkillMode(policy, skill.name);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    if (mode !== undefined && !skill.supportedModes.includes(mode)) {
+      return `Skill "${skill.name}" does not support ${mode}.`;
+    }
+  }
+
+  if (!adapter.capabilities.nativeMcpEvents) {
+    for (const server of targets.mcp) {
+      if (
+        server.transport !== 'stdio' &&
+        selectsMcpServer(policy, server.server)
+      ) {
+        return `MCP server "${server.server}" uses ${server.transport}, which requires native MCP events.`;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function normalizePromptAnswer(answer: string): string {
+  return answer.trim().toLowerCase();
+}
+
+function parseMultiSelectAnswer<T extends string>(
+  answer: string,
+  choices: Array<ChoiceItem<T>>,
+): T[] | undefined {
+  const normalized = normalizePromptAnswer(answer);
+  if (normalized === '') return [];
+  if (normalized === 'all') return choices.map((choice) => choice.value);
+  if (normalized === 'none') return [];
+
+  const selected = new Set<T>();
+  const tokens = normalized.split(/[,\s]+/).filter((token) => token.length > 0);
+  for (const token of tokens) {
+    const number = Number(token);
+    const selectedChoice = Number.isInteger(number)
+      ? choices[number - 1]
+      : choices.find(
+          (choice) =>
+            choice.value.toLowerCase() === token ||
+            choice.label.toLowerCase() === token,
+        );
+    if (selectedChoice === undefined) return undefined;
+    selected.add(selectedChoice.value);
+  }
+
+  return choices
+    .map((choice) => choice.value)
+    .filter((value) => selected.has(value));
+}
+
+async function promptChoice<T extends string>(
+  runtime: CliRuntime,
+  message: string,
+  choices: Array<ChoiceItem<T>>,
+  defaultValue?: T,
+): Promise<T> {
+  return runtime.select(message, choices, defaultValue);
+}
+
+async function promptMultiSelect<T extends string>(
+  runtime: CliRuntime,
+  message: string,
+  choices: Array<ChoiceItem<T>>,
+  defaults: readonly T[] = [],
+  language: Language = runtime.language(),
+): Promise<T[]> {
+  if (choices.length === 0) {
+    runtime.writeError(`${message}${cliText[language].colon} ${cliText[language].noneAvailable}\n`);
+    return [];
+  }
+
+  return runtime.multiSelect(
+    message,
+    choices,
+    defaults,
+    cliText[language].manualInput,
+  );
 }
 
 function epsilonClosure(
@@ -441,6 +782,216 @@ function selectsMcpServer(
   );
 }
 
+function agentChoices(registry: AdapterRegistry): Array<ChoiceItem<string>> {
+  return registry.list()
+    .map((adapter) => ({ value: adapter.id, label: adapter.id }))
+    .sort((left, right) => compareText(left.value, right.value));
+}
+
+function scopeChoices(): Array<ChoiceItem<Scope>> {
+  return scopes.map((scope) => ({ value: scope, label: scope }));
+}
+
+function skillChoices(
+  targets: DiscoveredTargets,
+  mode: SkillMode,
+): Array<ChoiceItem<string>> {
+  return targets.skills
+    .filter((skill) => skill.supportedModes.includes(mode))
+    .sort((left, right) =>
+      compareText(
+        targetSortKey(left.scope, left.name, left.path),
+        targetSortKey(right.scope, right.name, right.path),
+      )
+    )
+    .map((skill) => ({
+      value: skill.name,
+      label: `${skill.name} [${skill.scope}] ${skill.path}`,
+      selected: skill.selectedMode === mode,
+    }));
+}
+
+function mcpChoices(
+  adapter: AgentAdapter,
+  targets: DiscoveredTargets,
+): Array<ChoiceItem<string>> {
+  if (!adapter.capabilities.nativeMcpEvents && !adapter.capabilities.stdioMcpProxy) {
+    return [];
+  }
+  return targets.mcp
+    .filter((server) =>
+      adapter.capabilities.nativeMcpEvents || server.transport === 'stdio'
+    )
+    .sort((left, right) =>
+      compareText(
+        targetSortKey(left.scope, left.server, left.transport),
+        targetSortKey(right.scope, right.server, right.transport),
+      )
+    )
+    .map((server) => ({
+      value: server.server,
+      label: `${server.server} [${server.scope}] ${server.transport}`,
+      selected: server.selected === true,
+    }));
+}
+
+async function runInteractiveConfigure(
+  adapter: AgentAdapter,
+  runtime: CliRuntime,
+  language: Language,
+): Promise<void> {
+  const t = cliText[language];
+  const targets = await adapter.listTargets();
+  printTargets(targets, runtime, language);
+
+  const nativeChoices = adapter.capabilities.nativeSkillEvents
+    ? skillChoices(targets, 'native_hook')
+    : [];
+  const injectedChoices = adapter.capabilities.skillInjection
+    ? skillChoices(targets, 'injected_mcp')
+    : [];
+  const serverChoices = mcpChoices(adapter, targets);
+
+  const nativeHook = await promptMultiSelect(
+    runtime,
+    t.selectNativeSkills,
+    nativeChoices,
+    nativeChoices
+      .filter((choice) => choice.selected === true)
+      .map((choice) => choice.value),
+    language,
+  );
+  const injectedMcp = await promptMultiSelect(
+    runtime,
+    t.selectInjectedSkills,
+    injectedChoices,
+    injectedChoices
+      .filter((choice) => choice.selected === true)
+      .map((choice) => choice.value),
+    language,
+  );
+  const mcp = await promptMultiSelect(
+    runtime,
+    t.selectMcpServers,
+    serverChoices,
+    serverChoices
+      .filter((choice) => choice.selected === true)
+      .map((choice) => choice.value),
+    language,
+  );
+
+  const policy: AgentSelectionPolicy = {
+    skills: { native_hook: nativeHook, injected_mcp: injectedMcp },
+    mcp,
+  };
+  const error = selectionPolicyError(adapter, targets, policy);
+  if (error !== undefined) {
+    runtime.writeError(`${error}\n`);
+    runtime.setExitCode(1);
+    return;
+  }
+
+  printSelectionPolicy(policy, runtime, language);
+  if (!(await runtime.confirm(t.applyConfiguration))) {
+    runtime.writeError(`${t.configurationCancelled}\n`);
+    runtime.setExitCode(1);
+    return;
+  }
+
+  const results = await adapter.configure(policy);
+  if (printResults(results, runtime)) runtime.setExitCode(1);
+}
+
+async function runInteractiveReport(
+  runtime: CliRuntime,
+  agent: string,
+  language: Language,
+): Promise<void> {
+  const t = cliText[language];
+  const range = await promptChoice(
+    runtime,
+    t.selectReportRange,
+    namedRanges.map((range) => ({ value: range, label: range })),
+    '7d',
+  );
+  const database = runtime.openDatabase(runtime.paths().database);
+  try {
+    const repository = runtime.createRepository(database);
+    const since = namedRangeStart(range);
+    runtime.writeOutput(
+      renderUsageReportText(
+        repository.report(
+          { ...(since === undefined ? {} : { since }), agent },
+          range,
+        ),
+        language,
+      ),
+    );
+  } finally {
+    database.close();
+  }
+}
+
+async function runInteractiveWizard(
+  registry: AdapterRegistry,
+  runtime: CliRuntime,
+  initialLanguage: Language,
+): Promise<void> {
+  if (!runtime.isTTY()) {
+    runtime.writeError(`${cliText[initialLanguage].requiresTty}\n`);
+    runtime.setExitCode(1);
+    return;
+  }
+
+  const language = await promptChoice(
+    runtime,
+    cliText[initialLanguage].languagePrompt,
+    [
+      { value: 'zh', label: '中文' },
+      { value: 'en', label: 'English' },
+    ],
+    initialLanguage,
+  );
+  const t = cliText[language];
+
+  const agents = agentChoices(registry);
+  if (agents.length === 0) {
+    runtime.writeError(`${t.noAdapters}\n`);
+    runtime.setExitCode(1);
+    return;
+  }
+
+  const operation = await promptChoice(
+    runtime,
+    t.selectOperation,
+    wizardOperations(language),
+  );
+  const agent = await promptChoice(runtime, t.selectAgent, agents);
+  const adapter = registry.get(agent);
+
+  if (operation === 'configure') {
+    await runInteractiveConfigure(adapter, runtime, language);
+    return;
+  }
+  if (operation === 'list-targets') {
+    printTargets(await adapter.listTargets(), runtime, language);
+    return;
+  }
+  if (operation === 'health') {
+    const coverage = await adapter.health();
+    printHealth(adapter.capabilities, coverage, runtime, language);
+    return;
+  }
+  if (operation === 'report') {
+    await runInteractiveReport(runtime, agent, language);
+    return;
+  }
+
+  const scope = await promptChoice(runtime, t.selectScope, scopeChoices(), 'user');
+  const results = await adapter[operation](scope);
+  if (printResults(results, runtime)) runtime.setExitCode(1);
+}
+
 function logTelemetryError(
   runtime: CliRuntime,
   message: string,
@@ -480,7 +1031,7 @@ async function initializeProxyTelemetry(
     }
 
     database = runtime.openDatabase(paths.database);
-    const repository = runtime.createRepository(database);
+    const repository = runtime.createRepository(database, config);
     const emit = (event: UsageEvent): unknown => {
       if (
         event.kind !== 'mcp_call' ||
@@ -603,12 +1154,17 @@ export function createProgram(
   program
     .name('agent-usage')
     .description('Track and report coding-agent skill and MCP usage')
+    .option('--lang <lang>', 'output language: zh or en', languageChoice)
     .enablePositionalOptions()
     .exitOverride()
     .configureOutput({
       writeOut: runtime.writeOutput,
       writeErr: runtime.writeError,
     });
+
+  program.action(async () => {
+    await runInteractiveWizard(registry, runtime, commandLanguage(program, runtime));
+  });
 
   program
     .command('report')
@@ -628,6 +1184,7 @@ export function createProgram(
       (
         range: NamedRange,
         options: { agent?: string; kind?: UsageEvent['kind'] },
+        command: Command,
       ) => {
         const database = runtime.openDatabase(runtime.paths().database);
         try {
@@ -639,7 +1196,10 @@ export function createProgram(
             ...(options.kind === undefined ? {} : { kind: options.kind }),
           };
           runtime.writeOutput(
-            renderUsageReportText(repository.report(filter, range)),
+            renderUsageReportText(
+              repository.report(filter, range),
+              commandLanguage(command, runtime),
+            ),
           );
         } finally {
           database.close();
@@ -651,9 +1211,11 @@ export function createProgram(
     .command('mcp')
     .requiredOption('--agent <agent>', 'agent id')
     .action(async (options: { agent: string }) => {
-      const database = runtime.openDatabase(runtime.paths().database);
+      const paths = runtime.paths();
+      const config = await runtime.loadSelectionConfig(paths.config);
+      const database = runtime.openDatabase(paths.database);
       try {
-        const repository = runtime.createRepository(database);
+        const repository = runtime.createRepository(database, config);
         const service = new UsageMcpService(
           repository,
           options.agent,
@@ -727,7 +1289,11 @@ export function createProgram(
         command: Command,
       ) => {
         const adapter = selectedAdapter(command, registry, agent);
-        printTargets(await adapter.listTargets(), runtime);
+        printTargets(
+          await adapter.listTargets(),
+          runtime,
+          commandLanguage(command, runtime),
+        );
       },
     );
 
@@ -766,38 +1332,12 @@ export function createProgram(
         const adapter = selectedAdapter(command, registry, agent);
         const policy = desiredSelectionPolicy(command, adapter, options);
         const targets = await adapter.listTargets();
-        for (const skill of targets.skills) {
-          let mode: SkillMode | undefined;
-          try {
-            mode = selectedSkillMode(policy, skill.name);
-          } catch (error) {
-            command.error(
-              error instanceof Error ? error.message : String(error),
-            );
-          }
-          if (
-            mode !== undefined &&
-            !skill.supportedModes.includes(mode)
-          ) {
-            command.error(
-              `Skill "${skill.name}" does not support ${mode}.`,
-            );
-          }
-        }
-        if (!adapter.capabilities.nativeMcpEvents) {
-          for (const server of targets.mcp) {
-            if (
-              server.transport !== 'stdio' &&
-              selectsMcpServer(policy, server.server)
-            ) {
-              command.error(
-                `MCP server "${server.server}" uses ${server.transport}, which requires native MCP events.`,
-              );
-            }
-          }
+        const error = selectionPolicyError(adapter, targets, policy);
+        if (error !== undefined) {
+          command.error(error);
         }
 
-        printSelectionPolicy(policy, runtime);
+        printSelectionPolicy(policy, runtime, commandLanguage(command, runtime));
         const results = await adapter.configure(policy);
         if (printResults(results, runtime)) runtime.setExitCode(1);
       },
@@ -841,29 +1381,90 @@ export function createProgram(
         _options: object,
         command: Command,
       ) => {
+        const language = commandLanguage(command, runtime);
         const adapters = agent === undefined
           ? registry.list()
           : [selectedAdapter(command, registry, agent)];
         if (adapters.length === 0) {
-          runtime.writeOutput('No adapters registered.\n');
+          runtime.writeOutput(`${cliText[language].noAdaptersRegistered}\n`);
           return;
         }
 
         for (const adapter of adapters) {
           const coverage = await adapter.health();
-          runtime.writeOutput(`${coverage.agent}\n`);
-          printCapabilities(adapter.capabilities, runtime);
-          runtime.writeOutput(`  Skills: ${coverage.skills}\n`);
-          runtime.writeOutput(`  MCP: ${coverage.mcp}\n`);
-          if (coverage.issues.length === 0) {
-            runtime.writeOutput('  Issues: none\n');
-          } else {
-            runtime.writeOutput('  Issues:\n');
-            for (const issue of coverage.issues) {
-              runtime.writeOutput(`  - ${issue}\n`);
-            }
-          }
+          printHealth(adapter.capabilities, coverage, runtime, language);
         }
+      },
+    );
+
+  const webhook = program.command('webhook');
+
+  webhook
+    .command('set <url>')
+    .action(async (url: string, _options: object, command: Command) => {
+      const language = commandLanguage(command, runtime);
+      const paths = runtime.paths();
+      const config = await runtime.loadSelectionConfig(paths.config);
+      await runtime.saveSelectionConfig(paths.config, {
+        ...config,
+        webhook: { enabled: true, url },
+      });
+      runtime.writeOutput(`${cliText[language].webhookEnabled}${cliText[language].colon} ${url}\n`);
+    });
+
+  webhook
+    .command('unset')
+    .action(async (_options: object, command: Command) => {
+      const language = commandLanguage(command, runtime);
+      const paths = runtime.paths();
+      const config = await runtime.loadSelectionConfig(paths.config);
+      const { webhook: _webhook, ...nextConfig } = config;
+      await runtime.saveSelectionConfig(paths.config, nextConfig);
+      runtime.writeOutput(`${cliText[language].webhookDisabled}\n`);
+    });
+
+  webhook
+    .command('show')
+    .action(async (_options: object, command: Command) => {
+      const language = commandLanguage(command, runtime);
+      const config = await runtime
+        .loadSelectionConfig(runtime.paths().config)
+        .catch(() => emptySelectionConfig());
+      if (config.webhook === undefined) {
+        runtime.writeOutput(`${cliText[language].webhookNotConfigured}\n`);
+        return;
+      }
+      runtime.writeOutput(
+        `${cliText[language].webhookCurrent}${cliText[language].colon} ${config.webhook.enabled ? 'enabled' : 'disabled'} ${config.webhook.url}\n`,
+      );
+    });
+
+  program
+    .command('web')
+    .option('--host <host>', 'listen host', '127.0.0.1')
+    .option('--port <port>', 'listen port', portChoice, 17891)
+    .action(
+      async (
+        options: { host: string; port: number },
+        command: Command,
+      ) => {
+        const language = commandLanguage(command, runtime);
+        const server = await startAgentUsageWebServer({
+          registry,
+          runtime,
+          host: options.host,
+          port: options.port,
+        });
+        runtime.writeOutput(`${cliText[language].webListening}${cliText[language].colon} ${server.url}\n`);
+        await new Promise<void>((resolve) => {
+          const close = (): void => {
+            process.off('SIGINT', close);
+            process.off('SIGTERM', close);
+            void server.close().finally(resolve);
+          };
+          process.once('SIGINT', close);
+          process.once('SIGTERM', close);
+        });
       },
     );
 
@@ -882,6 +1483,7 @@ async function runClaudeHookCommand(runtime: CliRuntime): Promise<void> {
 
   let database: CliDatabase | undefined;
   let repository: CliRepository | undefined;
+  let selectionConfig: SelectionConfig | undefined;
   const normalizerDependencies: ClaudeNormalizerDependencies = {
     now: () => new Date(),
     randomUUID,
@@ -892,11 +1494,14 @@ async function runClaudeHookCommand(runtime: CliRuntime): Promise<void> {
 
   try {
     await consumeClaudeHook(text, {
-      loadSelectionConfig: () => runtime.loadSelectionConfig(paths.config),
+      loadSelectionConfig: async () => {
+        selectionConfig = await runtime.loadSelectionConfig(paths.config);
+        return selectionConfig;
+      },
       insert: (event) => {
         if (database === undefined) {
           database = runtime.openDatabase(paths.database);
-          repository = runtime.createRepository(database);
+          repository = runtime.createRepository(database, selectionConfig);
         }
         return repository!.insert(event);
       },

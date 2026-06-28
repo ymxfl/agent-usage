@@ -89,7 +89,7 @@ describe('JoyCode adapter MCP lifecycle (skillWatching wiring)', () => {
       // start() runs the reconciler's initial sync(): the pre-existing skill is
       // instrumented (skillWatching is delivered during the live session).
       const instrumented = await readFile(canonical, 'utf8');
-      expect(instrumented).toContain('agent-usage:begin v1');
+      expect(instrumented).toContain('agent-usage:begin v2');
 
       const stateFile = join(usageStateDir, 'joycode-skill-manifest.json');
       const manifest = JSON.parse(await readFile(stateFile, 'utf8')) as {
@@ -149,7 +149,7 @@ describe('JoyCode adapter MCP lifecycle (skillWatching wiring)', () => {
     writeFileSync(created, SKILL_WITH_FM, 'utf8');
 
     await new Promise((resolve) => setTimeout(resolve, 600));
-    expect(await readFile(created, 'utf8')).not.toContain('agent-usage:begin v1');
+    expect(await readFile(created, 'utf8')).not.toContain('agent-usage:begin v2');
   });
 
   it('the CLI mcp command passes the JoyCode lifecycle to runMcpServer', async () => {

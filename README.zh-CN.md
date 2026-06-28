@@ -27,13 +27,14 @@
 | 策略 | 观测内容 | 证据 | 精度 |
 | --- | --- | --- | --- |
 | **原生钩子**（Claude Code） | 通过插件钩子获取精确的 Skill 调用与 MCP 工具调用 | `native_hook` | 精确 |
-| **注入式 MCP 计数**（JoyCode） | 一段托管指令，要求智能体在每个会话中调用一次 `record_skill` | `injected_mcp` | 尽力而为 |
+| **注入式 MCP 计数**（JoyCode） | 一段托管指令，要求智能体每次使用被注入的 Skill 时调用 `record_skill` | `injected_mcp` | 尽力而为 |
 | **stdio MCP 代理**（JoyCode） | 一个透明的 JSON-RPC 代理，转发 stdio MCP 流量并记录尝试、结果和耗时 | `mcp_proxy` | 精确 |
 
 ### 统计内容
 
-- **Skill 会话加载**（`skill_session_load`）——可移植的核心指标。每个 `agent_session + skill_id`
-  最多计一次，因此同一会话内重复使用不会虚增计数。
+- **注入式 Skill 计数事件**（`skill_session_load`）——注入式适配器使用的可移植尽力而为指标。
+  事件名会为了 schema 兼容继续保留；当智能体遵循注入指令时，同一会话内重复调用
+  `record_skill` 也会被计数。
 - **Skill 调用**（`skill_invocation`）——在适配器支持时（Claude Code），统计每一次原生 Skill 调用。
 - **MCP 调用**（`mcp_call`）——每次工具请求计为一次尝试，结果为 `success`（成功）、`failure`
   （失败）或 `unknown`（未知，即请求已发起，但连接或进程在返回结果前结束）。
@@ -97,6 +98,15 @@ npm link           # 暴露 `agent-usage` 命令
 
 所有采集均为**手动开启（opt-in）**。全新安装时不会记录任何数据，直到你通过 `configure` 显式选择
 目标。
+
+日常配置可以直接运行交互式向导：
+
+```bash
+agent-usage
+```
+
+向导会先让你选择操作类型，再选择智能体；配置目标时支持对 Skill 和 MCP server 做多选。下面的显式
+命令仍然保留，适合脚本化和可重复配置。
 
 ### 1. 为某个智能体安装
 
@@ -189,6 +199,26 @@ MCP
 Coverage warnings
 - Injected MCP skill usage is best-effort and may be incomplete.
 ```
+
+### 5. Webhook 与本地 Web 控制台
+
+你可以把每条新写入的使用事件转发到一个 HTTP webhook。被本地数据库 dedupe 忽略的重复事件不会
+再次上报；webhook 失败也不会阻塞智能体的正常调用。
+
+```bash
+agent-usage webhook set https://example.test/usage
+agent-usage webhook show
+agent-usage webhook unset
+```
+
+如需本地可视化查看，启动浏览器控制台：
+
+```bash
+agent-usage web
+```
+
+默认监听 `http://127.0.0.1:17891`。页面可以查看 targets、执行常见的安装/配置/修复操作、查看报表、
+配置 webhook URL，并可一键设置为内置本地接收地址（`/webhook/usage`），实时观察上报事件。
 
 ### 生命周期命令
 
@@ -290,8 +320,9 @@ docs/superpowers/           # 设计规格与实现计划
 
 ## 已知限制
 
-- **JoyCode 的 Skill 遥测是尽力而为的**——它依赖模型遵循注入的指令，且同一会话内多次使用同一
-  Skill 只计为一次唯一的会话加载。
+- **JoyCode 的 Skill 遥测是尽力而为的**——它依赖模型遵循注入的指令。指令会要求每次使用 Skill
+  都调用 `record_skill`，包括同一会话内重复使用；但如果 JoyCode 复用缓存上下文，或模型跳过计数
+  调用，仍可能漏记。
 - **JoyCode 的远程 MCP 传输方式**（HTTP/SSE/Streamable HTTP）在本版本中不被统计；只有经过代理的
   stdio MCP 流量会被精确观测。
 - **新建的 JoyCode Skill 可能与监听器竞争**——在其创建的那次会话中可能漏记；系统保证在下一次

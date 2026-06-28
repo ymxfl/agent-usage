@@ -107,9 +107,9 @@ describe('JoyCodeSkillReconciler', () => {
     expect(result.degraded).toEqual([]);
 
     const userContent = await readFile(userFile, 'utf8');
-    expect(userContent).toContain('<!-- agent-usage:begin v1 -->');
+    expect(userContent).toContain('<!-- agent-usage:begin v2 -->');
     const fmEnd = userContent.indexOf('---\n', userContent.indexOf('---\n') + 1);
-    const beginIndex = userContent.indexOf('<!-- agent-usage:begin v1 -->');
+    const beginIndex = userContent.indexOf('<!-- agent-usage:begin v2 -->');
     expect(beginIndex).toBeGreaterThan(fmEnd);
   });
 
@@ -238,7 +238,7 @@ describe('JoyCodeSkillReconciler', () => {
     expect(result.instrumented).toContain(file);
 
     const after = await readFile(file, 'utf8');
-    expect(after).toContain('<!-- agent-usage:begin v1 -->');
+    expect(after).toContain('<!-- agent-usage:begin v2 -->');
     expect((after.match(/agent-usage:begin v\d+/g) ?? []).length).toBe(1);
   });
 
@@ -284,7 +284,7 @@ describe('JoyCodeSkillReconciler', () => {
     expect(entry).toBeDefined();
     expect(entry?.skillId).toMatch(/^joycode:user:/);
     expect(entry?.scope).toBe('user');
-    expect(entry?.injectionVersion).toBe(1);
+    expect(entry?.injectionVersion).toBe(2);
     expect(entry?.beforeHash).toBe(sha256(SKILL_WITH_FM));
     const afterContent = await readFile(file, 'utf8');
     expect(entry?.afterHash).toBe(sha256(afterContent));

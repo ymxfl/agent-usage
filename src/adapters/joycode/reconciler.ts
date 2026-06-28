@@ -7,7 +7,10 @@ import YAML from 'yaml';
 
 import { atomicWrite } from '../../core/atomic-file.js';
 import { stableSkillId } from '../../core/identity.js';
-import { injectAccountingBlock } from './skill-file.js';
+import {
+  injectAccountingBlock,
+  MANAGED_BLOCK_VERSION,
+} from './skill-file.js';
 import {
   emptyJoyCodeManifest,
   type InstrumentedSkillState,
@@ -130,9 +133,11 @@ export class JoyCodeSkillReconciler {
         }
 
         const skillId = stableSkillId('joycode', root.scope, canonical);
+        const skillName = String(entry).split('/')[0];
         const { content: next, changed } = injectAccountingBlock(
           original,
           skillId,
+          skillName,
         );
 
         if (changed) {
@@ -170,7 +175,7 @@ export class JoyCodeSkillReconciler {
           canonicalPath: canonical,
           skillId,
           scope: root.scope,
-          injectionVersion: 1,
+          injectionVersion: MANAGED_BLOCK_VERSION,
           beforeHash: sha256(original),
           afterHash: sha256(next),
           lastSeenAt: new Date().toISOString(),

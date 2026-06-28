@@ -1,16 +1,16 @@
 /**
  * Pure helpers for injecting an idempotent "managed accounting block" into a
  * JoyCode Skill's `SKILL.md`. The block instructs the model to call the
- * `record_skill` tool on the `usage-stats` MCP server once per session.
+ * `record_skill` tool on the `usage-stats` MCP server on each activation.
  *
  * These functions are PURE: no filesystem, no globals, no I/O. The contract
  * mirrors the Claude adapter's managed block but returns a `{ content, changed }`
  * tuple and is version-aware: a stale `v0` block is replaced (not duplicated)
- * with the current `v1` block.
+ * with the current block.
  */
 
 /** Current managed-block version. */
-export const MANAGED_BLOCK_VERSION = 1;
+export const MANAGED_BLOCK_VERSION = 2;
 
 const BEGIN = `<!-- agent-usage:begin v${MANAGED_BLOCK_VERSION} -->`;
 const END = '<!-- agent-usage:end -->';
@@ -26,11 +26,19 @@ const BOM = '﻿';
  * supplied line terminator. The block always ends with a trailing empty line so
  * the body that follows is cleanly separated.
  */
-function block(skillId: string, nl: string): string {
+function block(
+  skillId: string,
+  skillName: string | undefined,
+  nl: string,
+): string {
+  const payload = JSON.stringify({
+    skill_id: skillId,
+    ...(skillName === undefined ? {} : { skill_name: skillName }),
+  });
   return [
     BEGIN,
-    '**Usage accounting:** When this skill is first activated in the current agent session, call the `record_skill` tool from the `usage-stats` MCP server exactly once with',
-    `\`{"skill_id":"${skillId}"}\`. After any successful response, continue with the instructions below and do not call the accounting tool again in this session.`,
+    '**Usage accounting:** Every time this skill is activated, including repeated uses in the same agent session, call the `record_skill` tool from the `usage-stats` MCP server with',
+    `\`${payload}\` before following this skill's instructions. After any successful response, continue with the instructions below.`,
     'Do not call it when merely listing, inspecting, editing, or validating this Skill. If the tool is unavailable, continue without retrying.',
     END,
     '',
@@ -100,6 +108,7 @@ export function removeAccountingBlock(
 export function injectAccountingBlock(
   content: string,
   skillId: string,
+  skillName?: string,
 ): { content: string; changed: boolean } {
   const nl = content.includes('\r\n') ? '\r\n' : '\n';
   const clean = removeAccountingBlock(content).content;
@@ -108,6 +117,6 @@ export function injectAccountingBlock(
   const match = body.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
   const frontmatter = match?.[0] ?? '';
   const rest = body.slice(frontmatter.length);
-  const next = `${bom}${frontmatter}${block(skillId, nl)}${rest}`;
+  const next = `${bom}${frontmatter}${block(skillId, skillName, nl)}${rest}`;
   return { content: next, changed: next !== content };
 }

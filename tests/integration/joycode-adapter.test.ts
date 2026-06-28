@@ -29,7 +29,7 @@ const BUNDLE = join(REPO_ROOT, 'dist', 'agent-usage.mjs');
 const FAKE_SERVER = join(REPO_ROOT, 'tests', 'fixtures', 'fake-mcp-server.mjs');
 
 /** Marker inserted at the top of an injected-mcp skill. */
-const MANAGED_BLOCK_BEGIN = '<!-- agent-usage:begin v1 -->';
+const MANAGED_BLOCK_BEGIN = '<!-- agent-usage:begin v2 -->';
 
 interface JoyCodeMcpEntry {
   command?: string;
@@ -245,7 +245,7 @@ describe('joycode adapter end-to-end (real bundle)', () => {
     runCli(['install', 'joycode'], env);
 
     // report must run without error even when no events have been recorded.
-    const report = runCli(['report', '7d'], env);
+    const report = runCli(['--lang', 'en', 'report', '7d'], env);
     expect(report).toContain('Usage statistics');
     expect(report).toContain('7d');
   });

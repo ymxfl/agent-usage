@@ -22,13 +22,15 @@ export function nativeDedupeKey(agent: string, toolUseId: string): string {
 export function injectedDedupeKey(
   connectionId: string,
   skillId: string,
+  occurrenceId: string | number,
 ): string {
-  return `injected:${connectionId}:${skillId}`;
+  return `injected:${connectionId}:${skillId}:${JSON.stringify(occurrenceId)}`;
 }
 
 export function proxyDedupeKey(
   connectionId: string,
   requestId: string | number,
+  occurrenceId: string | number,
 ): string {
-  return `proxy:${connectionId}:${JSON.stringify(requestId)}`;
+  return `proxy:${connectionId}:${JSON.stringify(requestId)}:${JSON.stringify(occurrenceId)}`;
 }

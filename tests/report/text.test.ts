@@ -52,18 +52,24 @@ describe('renderUsageReportText', () => {
       ],
     };
 
-    expect(renderUsageReportText(report)).toBe(`Usage statistics — last 7 days
+    expect(renderUsageReportText(report, 'en')).toBe(`Usage statistics — last 7 days
 
 Totals
-- codex · skill_invocation · [native_hook, exact]: 3
-- joycode · mcp_call · [mcp_proxy, best_effort]: 1
+| Agent | Kind | Evidence | Precision | Count |
+| --- | --- | --- | --- | --- |
+| codex | skill_invocation | native_hook | exact | 3 |
+| joycode | mcp_call | mcp_proxy | best_effort | 1 |
 
 Skills
-- codex · test-driven-development: 3
+| Agent | Skill | Count |
+| --- | --- | --- |
+| codex | test-driven-development | 3 |
 
 MCP
-- codex · github.issues/list: 4 attempts (success 2, failure 1, unknown 1); avg 13 ms
-- codex · web.search: 1 attempt (success 0, failure 0, unknown 1); avg n/a
+| Agent | Tool | Attempts | Success | Failure | Unknown | Avg |
+| --- | --- | --- | --- | --- | --- | --- |
+| codex | github.issues/list | 4 | 2 | 1 | 1 | 13 ms |
+| codex | web.search | 1 | 0 | 0 | 1 | n/a |
 
 Coverage warnings
 - Injected MCP skill usage is best-effort and may be incomplete.
@@ -78,16 +84,16 @@ Coverage warnings
       topSkills: [],
       mcp: [],
       warnings: [],
-    })).toBe(`Usage statistics — today
+    })).toBe(`使用统计 — today
 
-Totals
-- None
+汇总
+无
 
 Skills
-- None
+无
 
 MCP
-- None
+无
 `);
   });
 });

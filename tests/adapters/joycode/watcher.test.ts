@@ -71,7 +71,7 @@ describe('JoyCodeSkillReconciler.watch()', () => {
 
     const handle = await reconciler.watch();
     try {
-      expect(await readFile(existing, 'utf8')).toContain('agent-usage:begin v1');
+      expect(await readFile(existing, 'utf8')).toContain('agent-usage:begin v2');
       const manifest = await readManifest(stateFile);
       expect(manifest.skills[existing]).toBeDefined();
     } finally {
@@ -97,7 +97,7 @@ describe('JoyCodeSkillReconciler.watch()', () => {
         // Allow time for chokidar awaitWriteFinish (>=150ms) + the 200ms debounce.
         await waitFor(
           async () =>
-            (await readFile(created, 'utf8')).includes('agent-usage:begin v1'),
+            (await readFile(created, 'utf8')).includes('agent-usage:begin v2'),
         );
 
         const manifest = await readManifest(stateFile);
@@ -159,7 +159,7 @@ describe('JoyCodeSkillReconciler.watch()', () => {
     // Give the watcher enough time that it WOULD have fired if still active.
     await new Promise((resolve) => setTimeout(resolve, 600));
 
-    expect(await readFile(created, 'utf8')).not.toContain('agent-usage:begin v1');
+    expect(await readFile(created, 'utf8')).not.toContain('agent-usage:begin v2');
   });
 
   it('close() clears timers and closes the watcher (no leaked FS handles)', async () => {

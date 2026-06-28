@@ -28,9 +28,27 @@ const agentSelectionSchema = z.strictObject({
 
 export type AgentSelectionPolicy = z.infer<typeof agentSelectionSchema>;
 
+const webhookConfigSchema = z.strictObject({
+  enabled: z.boolean().default(true),
+  url: z
+    .string()
+    .min(1)
+    .refine((value) => {
+      try {
+        const parsed = new URL(value);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    }, 'Webhook URL must be an http(s) URL'),
+});
+
+export type WebhookConfig = z.infer<typeof webhookConfigSchema>;
+
 const selectionConfigSchema = z.strictObject({
   version: z.literal(1),
   agents: z.record(z.string(), agentSelectionSchema),
+  webhook: webhookConfigSchema.optional(),
 });
 
 export type SelectionConfig = z.infer<typeof selectionConfigSchema>;

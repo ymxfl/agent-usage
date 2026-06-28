@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { openUsageDatabase } from '../../src/core/database.js';
 import type { UsageEvent } from '../../src/core/event.js';
@@ -374,6 +374,23 @@ describe('UsageRepository', () => {
       expect(repository.insert(event)).toBe(true);
       expect(repository.insert({ ...event, name: 'changed name' })).toBe(false);
       expect(repository.count()).toBe(1);
+    } finally {
+      database.close();
+    }
+  });
+
+  it('notifies only after a newly inserted event is stored', async () => {
+    const root = await temporaryDirectory();
+    const database = openUsageDatabase(join(root, 'usage.db'));
+    const onInsert = vi.fn();
+    const repository = new UsageRepository(database, { onInsert });
+    const event = eventVariants[0]!;
+
+    try {
+      expect(repository.insert(event)).toBe(true);
+      expect(repository.insert({ ...event, name: 'duplicate' })).toBe(false);
+      expect(onInsert).toHaveBeenCalledOnce();
+      expect(onInsert).toHaveBeenCalledWith(event);
     } finally {
       database.close();
     }

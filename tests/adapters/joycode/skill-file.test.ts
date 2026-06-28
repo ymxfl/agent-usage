@@ -10,18 +10,35 @@ const CRLF_ORIGINAL =
 
 describe('injectAccountingBlock', () => {
   it('inserts the begin marker after frontmatter and preserves CRLF', () => {
-    const { content, changed } = injectAccountingBlock(CRLF_ORIGINAL, 'joycode:deploy');
+    const { content, changed } = injectAccountingBlock(CRLF_ORIGINAL, 'joycode:deploy', 'deploy');
 
     expect(changed).toBe(true);
-    expect(content).toContain('agent-usage:begin v1');
+    expect(content).toContain('agent-usage:begin v2');
     expect(content).toContain('agent-usage:end');
     // Begin marker lands after the description line, not above the frontmatter.
     const descIndex = content.indexOf('description: Deploy safely');
-    const beginIndex = content.indexOf('<!-- agent-usage:begin v1 -->');
+    const beginIndex = content.indexOf('<!-- agent-usage:begin v2 -->');
     expect(beginIndex).toBeGreaterThan(descIndex);
     // CRLF line endings preserved.
     expect(content).toContain('\r\n');
     expect(content).toContain('"skill_id":"joycode:deploy"');
+    expect(content).toContain('"skill_name":"deploy"');
+  });
+
+  it('asks the agent to record every activation without a session limit', () => {
+    const { content } = injectAccountingBlock(CRLF_ORIGINAL, 'joycode:deploy');
+
+    expect(content).toContain('Every time this skill is activated');
+    expect(content).toContain('including repeated uses in the same agent session');
+    expect(content).not.toContain('exactly once');
+    expect(content).not.toContain('again in this session');
+  });
+
+  it('uses a new managed block version for the per-use accounting instruction', () => {
+    const { content } = injectAccountingBlock(CRLF_ORIGINAL, 'joycode:deploy');
+
+    expect(content).toContain('agent-usage:begin v2');
+    expect(content).not.toContain('agent-usage:begin v1');
   });
 
   it('is idempotent: re-injecting is a no-op (byte-identical, changed false)', () => {
@@ -45,10 +62,10 @@ describe('injectAccountingBlock', () => {
     const { content, changed } = injectAccountingBlock(original, 'joycode:no-fm');
 
     expect(changed).toBe(true);
-    expect(content).toContain('agent-usage:begin v1');
+    expect(content).toContain('agent-usage:begin v2');
     expect(content).toContain('# Deploy');
     // Block precedes the body.
-    expect(content.indexOf('agent-usage:begin v1')).toBeLessThan(
+    expect(content.indexOf('agent-usage:begin v2')).toBeLessThan(
       content.indexOf('# Deploy'),
     );
   });
@@ -58,7 +75,7 @@ describe('injectAccountingBlock', () => {
     const { content, changed } = injectAccountingBlock(original, 'joycode:bom');
 
     expect(changed).toBe(true);
-    expect(content).toContain('agent-usage:begin v1');
+    expect(content).toContain('agent-usage:begin v2');
     // BOM kept at the very start.
     expect(content.startsWith('﻿')).toBe(true);
     // Body preserved.
@@ -89,20 +106,20 @@ describe('injectAccountingBlock', () => {
     const { content, changed } = injectAccountingBlock(original, 'joycode:cjk');
 
     expect(changed).toBe(true);
-    expect(content).toContain('agent-usage:begin v1');
+    expect(content).toContain('agent-usage:begin v2');
     expect(content).toContain('执行。');
     expect(content).toContain('name: 发布');
   });
 
-  it('replaces a v0 managed block with exactly one v1 block', () => {
+  it('replaces a v0 managed block with exactly one v2 block', () => {
     const v0 =
       '---\nname: legacy\n---\n' +
       '<!-- agent-usage:begin v0 -->\nold block line\n<!-- agent-usage:end -->\n\nbody\n';
     const { content, changed } = injectAccountingBlock(v0, 'joycode:upgrade');
 
     expect(changed).toBe(true);
-    // Exactly one v1 begin marker and one end marker.
-    expect(content.match(/agent-usage:begin v1/g)).toHaveLength(1);
+    // Exactly one v2 begin marker and one end marker.
+    expect(content.match(/agent-usage:begin v2/g)).toHaveLength(1);
     expect(content.match(/agent-usage:end/g)).toHaveLength(1);
     // The v0 marker is gone.
     expect(content).not.toContain('agent-usage:begin v0');
@@ -110,9 +127,23 @@ describe('injectAccountingBlock', () => {
     expect(content).toContain('body');
   });
 
+  it('replaces a legacy v1 managed block with exactly one v2 block', () => {
+    const v1 =
+      '---\nname: legacy\n---\n' +
+      '<!-- agent-usage:begin v1 -->\nold block line\n<!-- agent-usage:end -->\n\nbody\n';
+    const { content, changed } = injectAccountingBlock(v1, 'joycode:upgrade');
+
+    expect(changed).toBe(true);
+    expect(content.match(/agent-usage:begin v2/g)).toHaveLength(1);
+    expect(content.match(/agent-usage:end/g)).toHaveLength(1);
+    expect(content).not.toContain('agent-usage:begin v1');
+    expect(content).not.toContain('old block line');
+    expect(content).toContain('body');
+  });
+
   it('throws on an unterminated managed block', () => {
     expect(() =>
-      injectAccountingBlock('<!-- agent-usage:begin v1 -->\nbroken', 'id'),
+      injectAccountingBlock('<!-- agent-usage:begin v2 -->\nbroken', 'id'),
     ).toThrow('Malformed');
   });
 
@@ -125,7 +156,7 @@ describe('injectAccountingBlock', () => {
     expect(second.content).toContain('"skill_id":"joycode:b"');
     expect(second.content).not.toContain('"skill_id":"joycode:a"');
     // Still exactly one block.
-    expect(second.content.match(/agent-usage:begin v1/g)).toHaveLength(1);
+    expect(second.content.match(/agent-usage:begin v2/g)).toHaveLength(1);
   });
 });
 
@@ -138,7 +169,7 @@ describe('removeAccountingBlock', () => {
 
   it('throws on a begin marker with no end marker', () => {
     expect(() =>
-      removeAccountingBlock('text\n<!-- agent-usage:begin v1 -->\nmore'),
+      removeAccountingBlock('text\n<!-- agent-usage:begin v2 -->\nmore'),
     ).toThrow('Malformed');
   });
 });

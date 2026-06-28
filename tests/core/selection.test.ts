@@ -149,10 +149,34 @@ describe('selection persistence', () => {
     });
   });
 
+  it('round-trips the optional webhook configuration', async () => {
+    const path = await temporaryPath();
+    const config: SelectionConfig = {
+      version: 1,
+      agents: {},
+      webhook: {
+        enabled: true,
+        url: 'http://127.0.0.1:17891/webhook/usage',
+      },
+    };
+
+    await saveSelectionConfig(path, config);
+
+    await expect(loadSelectionConfig(path)).resolves.toEqual(config);
+  });
+
   it.each([
     ['malformed JSON', '{'],
     ['unsupported version', JSON.stringify({ version: 2, agents: {} })],
     ['invalid policy shape', JSON.stringify({ version: 1, agents: { codex: {} } })],
+    [
+      'invalid webhook URL',
+      JSON.stringify({
+        version: 1,
+        agents: {},
+        webhook: { enabled: true, url: 'not-a-url' },
+      }),
+    ],
     [
       'empty selection pattern',
       JSON.stringify({

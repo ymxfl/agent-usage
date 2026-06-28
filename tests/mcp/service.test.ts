@@ -47,7 +47,7 @@ afterEach(() => {
 });
 
 describe('UsageMcpService.recordSkill', () => {
-  it('records the first skill once per connection and treats duplicates as success', () => {
+  it('records every skill call on the same connection', () => {
     const fixture = repositorySpy();
     const service = new UsageMcpService(
       fixture.repository,
@@ -62,10 +62,10 @@ describe('UsageMcpService.recordSkill', () => {
     });
     expect(service.recordSkill({ skill_id: 'skill-1', skill_name: 'Testing' })).toEqual({
       ok: true,
-      recorded: false,
+      recorded: true,
       next: 'continue',
     });
-    expect(fixture.events).toHaveLength(1);
+    expect(fixture.events).toHaveLength(2);
   });
 
   it('records the same skill for a different connection', () => {
@@ -76,8 +76,8 @@ describe('UsageMcpService.recordSkill', () => {
     expect(first.recordSkill({ skill_id: 'skill-1' }).recorded).toBe(true);
     expect(second.recordSkill({ skill_id: 'skill-1' }).recorded).toBe(true);
     expect(fixture.events.map(({ dedupeKey }) => dedupeKey)).toEqual([
-      'injected:connection-1:skill-1',
-      'injected:connection-2:skill-1',
+      'injected:connection-1:skill-1:1',
+      'injected:connection-2:skill-1:1',
     ]);
   });
 
@@ -117,7 +117,7 @@ describe('UsageMcpService.recordSkill', () => {
         outcome: 'unknown',
         evidence: 'injected_mcp',
         precision: 'best_effort',
-        dedupeKey: 'injected:connection-1:claude:user:skill-1',
+        dedupeKey: 'injected:connection-1:claude:user:skill-1:1',
       },
     ]);
     expect(fixture.events[0]).not.toHaveProperty('prompt');
