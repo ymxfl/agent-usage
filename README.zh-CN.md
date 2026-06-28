@@ -1,6 +1,6 @@
 # agent-usage
 
-[English](README.md) | **简体中文**
+[English](README.en.md) | **简体中文**
 
 **面向编程智能体的本地优先用量统计工具。**
 
@@ -8,7 +8,7 @@
 `/usage-stats` 查询结果。它的设计原则是：在智能体提供真实事件接口的地方做到精确，在只能估算
 的地方如实标注，并且对你的提示词和数据保持沉默——它只存储计数和元数据，绝不存储内容。
 
-首个版本面向 **Claude Code** 和 **JoyCode**，所有与具体智能体相关的行为都被隔离在带版本的适配器
+当前版本面向 **Claude Code**、**JoyCode** 和 **Codex**，所有与具体智能体相关的行为都被隔离在带版本的适配器
 契约之后，使存储与统计的核心逻辑完全不依赖具体智能体。
 
 ---
@@ -26,9 +26,10 @@
 
 | 策略 | 观测内容 | 证据 | 精度 |
 | --- | --- | --- | --- |
-| **原生钩子**（Claude Code） | 通过插件钩子获取精确的 Skill 调用与 MCP 工具调用 | `native_hook` | 精确 |
-| **注入式 MCP 计数**（JoyCode） | 一段托管指令，要求智能体每次使用被注入的 Skill 时调用 `record_skill` | `injected_mcp` | 尽力而为 |
+| **原生钩子**（Claude Code、Codex） | 通过平台钩子获取精确的 Skill 调用或 MCP 工具调用 | `native_hook` | 精确 |
+| **注入式 MCP 计数**（JoyCode、Codex） | 一段托管指令，要求智能体每次使用被注入的 Skill 时调用 `record_skill` | `injected_mcp` | 尽力而为 |
 | **stdio MCP 代理**（JoyCode） | 一个透明的 JSON-RPC 代理，转发 stdio MCP 流量并记录尝试、结果和耗时 | `mcp_proxy` | 精确 |
+| **Codex 会话日志同步**（Codex） | 从 `~/.codex/sessions/**/*.jsonl` 读取 MCP 完成事件，补齐 native hook 未执行时的 MCP 统计 | `session_log` | 精确 |
 
 ### 统计内容
 
@@ -44,10 +45,14 @@
 
 ## 支持的智能体
 
-| 智能体 | Skill（原生钩子） | Skill（注入式） | MCP（原生） | MCP（stdio 代理） | Skill 监听 |
-| --- | :---: | :---: | :---: | :---: | :---: |
-| `claude-code` | ✅ | ✅ | ✅ | — | — |
-| `joycode` | — | ✅ | — | ✅ | ✅ |
+| 智能体 | Skill（原生钩子） | Skill（注入式） | MCP（原生） | MCP（会话日志） | MCP（stdio 代理） | Skill 监听 |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `claude-code` | ✅ | ✅ | ✅ | — | — | — |
+| `joycode` | — | ✅ | — | — | ✅ | ✅ |
+| `codex` | — | ✅ | ✅ | ✅ | — | — |
+
+Codex 适配器当前只扫描 `~/.codex/skills` 下的一层用户 Skill，并跳过 `.system` 等隐藏目录；插件 Skill、
+系统 Skill 和其他导入路径暂不纳入注入统计。
 
 ## 隐私
 
@@ -64,7 +69,7 @@
 ## 环境要求
 
 - **Node.js ≥ 24**（使用内置的 `node:sqlite`）
-- 一个受支持的编程智能体（Claude Code 和/或 JoyCode）
+- 一个受支持的编程智能体（Claude Code、JoyCode 和/或 Codex）
 
 ## 构建
 
@@ -116,12 +121,14 @@ agent-usage
 ```bash
 agent-usage install claude-code
 agent-usage install joycode
+agent-usage install codex
 ```
 
 ### 2. 查看可观测的内容
 
 ```bash
 agent-usage list-targets claude-code
+agent-usage list-targets codex
 ```
 
 列出已发现的 Skill 和 MCP 服务器，包括各自支持的采集模式、当前已选模式、未匹配的模式以及任何
@@ -157,6 +164,10 @@ agent-usage configure joycode --all-skills injected_mcp --all-mcp
     "joycode": {
       "skills": { "injected_mcp": ["deploy", "release-*"] },
       "mcp": ["github", "filesystem"]
+    },
+    "codex": {
+      "skills": { "injected_mcp": ["pointed"] },
+      "mcp": ["dom-pointer"]
     }
   }
 }
@@ -183,20 +194,26 @@ agent-usage report 30d --agent claude-code --kind mcp_call
 钩子策略被阻止、待同步等）。
 
 ```text
-Usage statistics — 7d
+使用统计 — 7d
 
-Totals
-- claude-code · skill_session_load · [native_hook, exact]: 42
-- claude-code · mcp_call · [native_hook, exact]: 128
-- joycode · skill_session_load · [injected_mcp, best_effort]: 7
+汇总
+| 智能体 | 类型 | 证据 | 精度 | 次数 |
+| --- | --- | --- | --- | --- |
+| claude-code | mcp_call | native_hook | exact | 128 |
+| codex | mcp_call | session_log | exact | 4 |
+| joycode | skill_session_load | injected_mcp | best_effort | 7 |
 
 Skills
-- claude-code · review: 42
+| 智能体 | Skill | 次数 |
+| --- | --- | --- |
+| joycode | pointed | 7 |
 
 MCP
-- claude-code · github.create_issue: 5 attempts (success 5, failure 0, unknown 0); avg 318 ms
+| 智能体 | 工具 | 尝试 | 成功 | 失败 | 未知 | 平均 |
+| --- | --- | --- | --- | --- | --- | --- |
+| codex | dom-pointer.get-pointed-element | 4 | 4 | 0 | 0 | 5 ms |
 
-Coverage warnings
+覆盖率提示
 - Injected MCP skill usage is best-effort and may be incomplete.
 ```
 
@@ -217,15 +234,17 @@ agent-usage webhook unset
 agent-usage web
 ```
 
-默认监听 `http://127.0.0.1:17891`。页面可以查看 targets、执行常见的安装/配置/修复操作、查看报表、
-配置 webhook URL，并可一键设置为内置本地接收地址（`/webhook/usage`），实时观察上报事件。
+默认监听 `http://127.0.0.1:17891`。页面可以查看 targets、执行常见的安装/同步/修复/卸载操作、查看
+表格报表、配置 webhook URL，并可一键设置为内置本地接收地址（`/webhook/usage`），实时观察上报
+事件。操作按钮会先确认再执行，并在页面上展示结果；统计模式下拉框会用颜色区分“不统计 / 原生钩子
+/ 注入计数”，已启用统计的 Skill 和 MCP 服务会自动排在列表顶部。
 
 ### 生命周期命令
 
 | 命令 | 用途 |
 | --- | --- |
 | `install <agent>` | 注册 MCP 服务器、命令和钩子 |
-| `sync [agent]` | 为新发现的 Skill 注入；封装新增的 stdio MCP 服务器 |
+| `sync [agent]` | 为新发现的 Skill 注入；封装新增的 stdio MCP 服务器；同步 Codex 会话日志 |
 | `health [agent]` | 只汇报覆盖情况，不做任何修改 |
 | `repair [agent]` | 根据清单恢复缺失的托管条目 |
 | `uninstall <agent>` | 移除托管块/条目；保留无关配置 |
@@ -247,7 +266,8 @@ Agent session
   ├─ Agent adapter
   │   ├─ native hooks, and/or
   │   ├─ injected Skill accounting, and/or
-  │   └─ stdio MCP proxy
+  │   ├─ stdio MCP proxy, and/or
+  │   └─ Codex session-log sync
   ├─ usage-stats MCP server
   │   ├─ record_skill
   │   └─ query_usage
@@ -260,7 +280,7 @@ Agent session
 ```
 
 **核心层（core）**负责事件 schema 校验与迁移、稳定的 Skill ID 生成、带有限忙时重试的 SQLite WAL
-写入、去重、时间范围聚合，以及终端报表渲染。它**完全不包含** Claude Code 或 JoyCode 的路径逻辑。
+写入、去重、时间范围聚合，以及终端报表渲染。它**完全不包含**任何具体智能体的路径逻辑。
 
 每个**适配器（adapter）**组合三个策略接口——`SkillInstrumentationStrategy`、
 `McpObservationStrategy` 和 `ConfigMutationStrategy`——并实现
@@ -278,6 +298,7 @@ interface AgentAdapter {
   repair(scope: Scope): Promise<OperationResult[]>;
   uninstall(scope: Scope): Promise<OperationResult[]>;
   health(): Promise<CoverageReport>;
+  createMcpLifecycle?(): Promise<McpLifecycle | undefined>;
 }
 ```
 
@@ -292,7 +313,8 @@ interface AgentAdapter {
 ├── config.json         # 选择策略
 ├── state/
 │   ├── installs.json
-│   └── joycode-skills.json
+│   ├── joycode-*.json
+│   └── codex-*.json
 └── logs/
     └── errors.log
 ```
@@ -307,6 +329,7 @@ src/
 ├── core/                   # 与具体 Agent 无关：数据库、事件、查询、选择、仓库
 ├── adapters/
 │   ├── claude/             # Claude Code：原生钩子 + 插件文件
+│   ├── codex/              # Codex：Skill 注入 + hooks.json + config.toml + 会话日志同步
 │   ├── joycode/            # JoyCode：注入式计数 + stdio 代理 + Skill 监听
 │   ├── registry.ts
 │   └── types.ts            # AgentAdapter 契约
@@ -327,7 +350,12 @@ docs/superpowers/           # 设计规格与实现计划
   stdio MCP 流量会被精确观测。
 - **新建的 JoyCode Skill 可能与监听器竞争**——在其创建的那次会话中可能漏记；系统保证在下一次
   调用或下一次会话中完成补齐，而非保证当次会话内零丢失。
-- 没有提供 HTML 或托管式仪表盘——首个版本仅支持终端/智能体。
+- **Codex Skill 统计是注入式的**——当前只处理 `~/.codex/skills` 下的用户 Skill；如果 Codex 未遵循
+  注入指令，Skill 计数仍可能漏记。
+- **Codex MCP 统计优先使用 native hook，并用会话日志补齐**。如果 Codex hook 尚未在 `/hooks` 中被
+  信任，`sync codex` 或启动 `agent-usage mcp --agent codex` 时仍会从本地 session log 补齐已选 MCP
+  服务的完成事件。
+- 本地 Web 控制台只监听本机地址，当前没有提供托管式远程仪表盘。
 
 完整的目标、计数语义和验收标准，请参见
 [设计规格](docs/superpowers/specs/2026-06-18-cross-agent-usage-stats-design.md)。
@@ -337,7 +365,7 @@ docs/superpowers/           # 设计规格与实现计划
 ```bash
 npm install
 npm run check     # 类型检查
-npm test          # 完整套件（30 个测试文件）
+npm test          # 完整套件
 ```
 
 所有文件改动在文件层面是事务性的：先解析校验再修改、写入同目录的临时文件、保留权限、原子化重命名
