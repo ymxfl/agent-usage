@@ -15,7 +15,7 @@ export interface InstrumentedSkillState {
   /** Scope the Skill was discovered under. */
   scope: 'user' | 'project';
   /** Managed-block version present in the file. */
-  injectionVersion: 1;
+  injectionVersion: number;
   /** SHA-256 of the file bytes immediately before injection. */
   beforeHash: string;
   /** SHA-256 of the file bytes immediately after injection. */

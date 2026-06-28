@@ -150,9 +150,64 @@ function runtimeFixture(
       writeOutput: (text) => stdout.push(text),
       writeError: (text) => stderr.push(text),
       setExitCode: (code) => exitCodes.push(code),
+      language: () => 'en',
       ...overrides,
     },
   };
+}
+
+function interactiveRuntimeFixture(answers: string[]): RuntimeFixture {
+  const pending = [...answers];
+  const takeAnswer = (): string => {
+    const answer = pending.shift();
+    if (answer === undefined) throw new Error('No interactive answer queued');
+    return answer;
+  };
+  const normalize = (answer: string): string => answer.trim().toLowerCase();
+  const chooseOne = <T extends string>(
+    answer: string,
+    choices: Array<{ value: T; label: string }>,
+    defaultValue?: T,
+  ): T => {
+    const normalized = normalize(answer);
+    if (normalized === '' && defaultValue !== undefined) return defaultValue;
+    const number = Number(normalized);
+    const numbered = Number.isInteger(number) ? choices[number - 1] : undefined;
+    if (numbered !== undefined) return numbered.value;
+    const matched = choices.find(
+      (choice) =>
+        choice.value.toLowerCase() === normalized ||
+        choice.label.toLowerCase() === normalized,
+    );
+    if (matched !== undefined) return matched.value;
+    throw new Error(`No matching interactive choice for ${answer}`);
+  };
+  const chooseMany = <T extends string>(
+    answer: string,
+    choices: Array<{ value: T; label: string }>,
+    defaults: readonly T[] = [],
+  ): T[] => {
+    const normalized = normalize(answer);
+    if (normalized === '') return [...defaults];
+    if (normalized === 'all') return choices.map((choice) => choice.value);
+    if (normalized === 'none') return [];
+    const selected = new Set<T>();
+    for (const token of normalized.split(/[,\s]+/).filter(Boolean)) {
+      selected.add(chooseOne(token, choices));
+    }
+    return choices
+      .map((choice) => choice.value)
+      .filter((value) => selected.has(value));
+  };
+  return runtimeFixture({
+    isTTY: () => true,
+    prompt: vi.fn(async () => takeAnswer()),
+    select: vi.fn(async (_message, choices, defaultValue) =>
+      chooseOne(takeAnswer(), choices, defaultValue)),
+    multiSelect: vi.fn(async (_message, choices, defaults) =>
+      chooseMany(takeAnswer(), choices, defaults)),
+    confirm: vi.fn(async () => true),
+  } as unknown as Partial<CliRuntime>);
 }
 
 function selectionConfig(
@@ -337,6 +392,79 @@ describe('hidden Claude hook command', () => {
 });
 
 describe('target selection commands', () => {
+  it('runs a no-argument interactive wizard for configure with multi-select targets', async () => {
+    const adapter = fakeAdapter('joycode', { nativeSkillEvents: false });
+    adapter.listTargets.mockResolvedValue({
+      agent: 'joycode',
+      skills: [
+        {
+          name: 'fix-quick-deploy',
+          scope: 'user',
+          path: '/user/skills/fix-quick-deploy/SKILL.md',
+          supportedModes: ['injected_mcp'],
+        },
+        {
+          name: 'pointed',
+          scope: 'user',
+          path: '/user/skills/pointed/SKILL.md',
+          supportedModes: ['injected_mcp'],
+          selectedMode: 'injected_mcp',
+        },
+      ],
+      mcp: [
+        {
+          server: 'dom-pointer',
+          scope: 'user',
+          transport: 'stdio',
+        },
+      ],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = interactiveRuntimeFixture([
+      'en',
+      'configure',
+      'joycode',
+      'all',
+      'all',
+    ]);
+
+    await parse(registryWith(adapter), fixture.runtime, []);
+
+    expect(adapter.configure).toHaveBeenCalledWith({
+      skills: {
+        native_hook: [],
+        injected_mcp: ['fix-quick-deploy', 'pointed'],
+      },
+      mcp: ['dom-pointer'],
+    });
+    expect(fixture.stdout.join('')).toContain('Desired policy:');
+  });
+
+  it('runs a no-argument interactive wizard for install with scope selection', async () => {
+    const adapter = fakeAdapter('joycode');
+    const fixture = interactiveRuntimeFixture([
+      'en',
+      'install',
+      'joycode',
+      'project',
+    ]);
+
+    await parse(registryWith(adapter), fixture.runtime, []);
+
+    expect(adapter.install).toHaveBeenCalledWith('project');
+    expect(adapter.configure).not.toHaveBeenCalled();
+  });
+
+  it('refuses the no-argument interactive wizard without a TTY', async () => {
+    const fixture = runtimeFixture({ isTTY: () => false });
+
+    await parse(registryWith(fakeAdapter('joycode')), fixture.runtime, []);
+
+    expect(fixture.exitCodes).toContain(1);
+    expect(fixture.stderr.join('')).toMatch(/interactive.*TTY/i);
+  });
+
   it('lists user and project Skills and MCP for only the selected adapter', async () => {
     const other = fakeAdapter('other');
     const adapter = fakeAdapter();
@@ -415,6 +543,36 @@ describe('target selection commands', () => {
         '  Unresolved patterns: none\n' +
         '  Issues: none\n',
     );
+  });
+
+  it('supports Chinese output for non-interactive commands', async () => {
+    const adapter = fakeAdapter('joycode');
+    adapter.listTargets.mockResolvedValue({
+      agent: 'joycode',
+      skills: [{
+        name: 'pointed',
+        scope: 'user',
+        path: '/user/skills/pointed/SKILL.md',
+        supportedModes: ['injected_mcp'],
+        selectedMode: 'injected_mcp',
+      }],
+      mcp: [],
+      unresolved: [],
+      issues: [],
+    });
+    const fixture = runtimeFixture();
+
+    await parse(
+      registryWith(adapter),
+      fixture.runtime,
+      ['--lang', 'zh', 'list-targets', 'joycode'],
+    );
+
+    const output = fixture.stdout.join('');
+    expect(output).toContain('Skills：');
+    expect(output).toContain('MCP：无');
+    expect(output).toContain('未匹配的选择模式：无');
+    expect(output).toContain('问题：无');
   });
 
   it('builds a replacement policy from repeated selectors and deduplicates exact repeats', async () => {
@@ -788,6 +946,32 @@ describe('target selection commands', () => {
   );
 });
 
+describe('webhook commands', () => {
+  it('sets, shows, and unsets the shared webhook configuration', async () => {
+    const fixture = runtimeFixture();
+
+    await parse(new AdapterRegistry(), fixture.runtime, [
+      'webhook',
+      'set',
+      'https://example.test/usage',
+    ]);
+    await parse(new AdapterRegistry(), fixture.runtime, ['webhook', 'show']);
+
+    expect(fixture.stdout.join('')).toContain(
+      'Webhook enabled: https://example.test/usage',
+    );
+    expect(fixture.stdout.join('')).toContain(
+      'Webhook: enabled https://example.test/usage',
+    );
+
+    await parse(new AdapterRegistry(), fixture.runtime, ['webhook', 'unset']);
+    await parse(new AdapterRegistry(), fixture.runtime, ['webhook', 'show']);
+
+    expect(fixture.stdout.join('')).toContain('Webhook disabled');
+    expect(fixture.stdout.join('')).toContain('Webhook: none');
+  });
+});
+
 describe('lifecycle commands', () => {
   it.each(['install', 'sync', 'repair', 'uninstall'] as const)(
     'routes %s to the selected adapter and scope',
@@ -889,8 +1073,12 @@ describe('report', () => {
 
     expect(openDatabase).toHaveBeenCalledWith(join(fixture.root, 'usage.db'));
     expect(fixture.stdout.join('')).toContain('Usage statistics — all');
-    expect(fixture.stdout.join('')).toContain('codex · skill_invocation');
-    expect(fixture.stdout.join('')).not.toContain('other · skill_invocation');
+    expect(fixture.stdout.join('')).toContain(
+      '| codex | skill_invocation | native_hook | exact | 1 |',
+    );
+    expect(fixture.stdout.join('')).not.toContain(
+      '| other | skill_invocation | native_hook | exact | 1 |',
+    );
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -900,6 +1088,29 @@ describe('report', () => {
     await parse(new AdapterRegistry(), fixture.runtime, ['report']);
 
     expect(fixture.stdout.join('')).toContain('Usage statistics — 7d');
+  });
+
+  it('filters interactive reports by the selected agent', async () => {
+    const fixture = interactiveRuntimeFixture(['en', 'report', 'codex', 'all']);
+    const database = openUsageDatabase(join(fixture.root, 'usage.db'));
+    const repository = new UsageRepository(database);
+    repository.insert(
+      usageEvent({ agent: 'codex', kind: 'skill_invocation' }),
+    );
+    repository.insert(
+      usageEvent({ agent: 'other', kind: 'skill_invocation' }),
+    );
+    database.close();
+
+    await parse(registryWith(fakeAdapter('codex')), fixture.runtime, []);
+
+    expect(fixture.stdout.join('')).toContain('Usage statistics — all');
+    expect(fixture.stdout.join('')).toContain(
+      '| codex | skill_invocation | native_hook | exact | 1 |',
+    );
+    expect(fixture.stdout.join('')).not.toContain(
+      '| other | skill_invocation | native_hook | exact | 1 |',
+    );
   });
 });
 

@@ -31,6 +31,7 @@ import {
 } from '../../core/selection.js';
 import {
   injectAccountingBlock,
+  MANAGED_BLOCK_VERSION,
   removeAccountingBlock,
 } from './skill-file.js';
 import {
@@ -375,6 +376,7 @@ export function createJoyCodeAdapter(
           ? injectAccountingBlock(
               original,
               stableSkillId(JOYCODE_ADAPTER_ID, skill.scope, skill.canonical),
+              skill.name,
             )
           : removeAccountingBlock(original);
 
@@ -453,7 +455,7 @@ export function createJoyCodeAdapter(
       canonicalPath: skill.canonical,
       skillId: stableSkillId(JOYCODE_ADAPTER_ID, skill.scope, skill.canonical),
       scope: skill.scope,
-      injectionVersion: 1,
+      injectionVersion: MANAGED_BLOCK_VERSION,
       beforeHash: sha256(toBytes(before)),
       afterHash: sha256(toBytes(after)),
       lastSeenAt: new Date().toISOString(),

@@ -7,13 +7,19 @@ import {
   type UsageReport,
 } from './query.js';
 
+export interface UsageRepositoryOptions {
+  onInsert?: (event: UsageEvent) => void;
+}
+
 export class UsageRepository {
   readonly #database: DatabaseSync;
   readonly #insertStatement: StatementSync;
   readonly #countStatement: StatementSync;
+  readonly #onInsert: ((event: UsageEvent) => void) | undefined;
 
-  constructor(database: DatabaseSync) {
+  constructor(database: DatabaseSync, options: UsageRepositoryOptions = {}) {
     this.#database = database;
+    this.#onInsert = options.onInsert;
     this.#insertStatement = database.prepare(`
       INSERT OR IGNORE INTO usage_events (
         schema_version,
@@ -55,7 +61,9 @@ export class UsageRepository {
       event.dedupeKey,
     );
 
-    return result.changes === 1 || result.changes === 1n;
+    const inserted = result.changes === 1 || result.changes === 1n;
+    if (inserted) this.#onInsert?.(event);
+    return inserted;
   }
 
   count(): number {

@@ -59,25 +59,37 @@ describe('dedupe keys', () => {
       injectedDedupeKey(
         'connection-123',
         'codex:project:0123456789abcdef',
+        1,
       ),
-    ).toBe('injected:connection-123:codex:project:0123456789abcdef');
+    ).toBe('injected:connection-123:codex:project:0123456789abcdef:1');
   });
 
   it('formats MCP proxy keys', () => {
-    expect(proxyDedupeKey('connection-123', 'request-456')).toBe(
-      'proxy:connection-123:"request-456"',
+    expect(proxyDedupeKey('connection-123', 'request-456', 1)).toBe(
+      'proxy:connection-123:"request-456":1',
     );
   });
 
   it('formats numeric MCP proxy request IDs', () => {
-    expect(proxyDedupeKey('connection-123', 456)).toBe(
-      'proxy:connection-123:456',
+    expect(proxyDedupeKey('connection-123', 456, 1)).toBe(
+      'proxy:connection-123:456:1',
     );
   });
 
   it('distinguishes numeric proxy request IDs from numeric strings', () => {
-    expect(proxyDedupeKey('connection-123', 456)).not.toBe(
-      proxyDedupeKey('connection-123', '456'),
+    expect(proxyDedupeKey('connection-123', 456, 1)).not.toBe(
+      proxyDedupeKey('connection-123', '456', 1),
+    );
+  });
+
+  it('distinguishes repeated injected and proxy calls', () => {
+    expect(
+      injectedDedupeKey('connection-123', 'codex:project:skill', 1),
+    ).not.toBe(
+      injectedDedupeKey('connection-123', 'codex:project:skill', 2),
+    );
+    expect(proxyDedupeKey('connection-123', 'request-456', 1)).not.toBe(
+      proxyDedupeKey('connection-123', 'request-456', 2),
     );
   });
 });

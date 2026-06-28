@@ -39,11 +39,11 @@ Users query the data from the agent with `/usage-stats`. The first release does 
 
 ### Skill metrics
 
-`unique_skill_session_load` is the portable metric. It counts at most one load for a given `agent_session + skill_id`.
+`skill_session_load` is the portable injected-accounting metric. The name is retained for schema compatibility, but the storage layer counts each accepted `record_skill` event rather than limiting a Skill to one event per `agent_session + skill_id`.
 
 Claude Code additionally exposes `skill_invocation`, which counts every native Skill invocation seen through `UserPromptExpansion`, `PostToolUse`, or `PostToolUseFailure` as appropriate.
 
-JoyCode records `unique_skill_session_load` through the injected `usage-stats.record_skill` MCP call. Multiple uses of the same Skill in one JoyCode session count once because a static Skill instruction has no reliable per-invocation identifier.
+JoyCode records `skill_session_load` through the injected `usage-stats.record_skill` MCP call. The injected instruction asks the model to call `record_skill` before every Skill use, including repeated uses in the same session. The count remains best-effort because JoyCode has no native per-invocation Skill event surface, so missed model-followed accounting calls cannot be recovered.
 
 ### MCP metrics
 
@@ -161,9 +161,9 @@ The server exposes:
 - `record_skill(skill_id, skill_name?, scope?)`
 - `query_usage(range?, agent?, kind?, limit?)`
 
-Each stdio MCP connection receives an internal `connection_id`. `record_skill` deduplicates on `connection_id + skill_id`, so repeated model calls do not inflate the portable Skill-load count.
+Each stdio MCP connection receives an internal `connection_id`. `record_skill` adds a per-connection occurrence sequence to its storage key, so repeated model calls for the same Skill in one connection are stored as distinct best-effort accounting events.
 
-The tool returns a small success response that tells the Agent to continue the Skill and not call the accounting tool again in the current session. A duplicate returns success with `recorded: false` rather than an error, preventing retry loops.
+The tool returns a small success response that tells the Agent to continue the Skill. Storage errors fail open with `recorded: false` rather than interrupting the user's work.
 
 ### stdio MCP Proxy
 
@@ -253,12 +253,12 @@ When the MCP server starts in a project, it also reconciles that project's Skill
 The managed block is inserted immediately after the closing YAML frontmatter delimiter and before the original body. A file without frontmatter receives the block at the beginning.
 
 ```markdown
-<!-- agent-usage:begin v1 -->
-**Usage accounting:** When this skill is first activated in the current agent
-session, call the `record_skill` tool from the `usage-stats` MCP server exactly
-once with `{"skill_id":"joycode:user:example"}`. After any successful response,
-continue with the instructions below and do not call the accounting tool again
-in this session. Do not call it when merely listing, inspecting, editing, or
+<!-- agent-usage:begin v2 -->
+**Usage accounting:** Every time this skill is activated, including repeated uses
+in the same agent session, call the `record_skill` tool from the `usage-stats`
+MCP server with `{"skill_id":"joycode:user:example"}` before following this
+skill's instructions. After any successful response, continue with the
+instructions below. Do not call it when merely listing, inspecting, editing, or
 validating this Skill. If the tool is unavailable, continue without retrying.
 <!-- agent-usage:end -->
 ```
@@ -423,7 +423,7 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 - Claude Code records selected native Skill and MCP events without modifying native-only Skill files; only Skills selected for `injected_mcp` receive a managed block.
 - Selected JoyCode existing and newly discovered Skills receive exactly one current managed block.
 - Unselected Skills have no managed block and unselected MCP servers are not proxied or stored.
-- JoyCode repeated `record_skill` calls in one MCP connection do not inflate the portable count.
+- JoyCode repeated `record_skill` calls in one MCP connection are counted as distinct best-effort Skill accounting events.
 - JoyCode stdio MCP calls are relayed transparently and counted with outcomes.
 - `/usage-stats` reports the last seven days by default and labels accuracy and transport coverage.
 - No prompt, Skill content, MCP argument, or MCP result is persisted.
@@ -434,7 +434,7 @@ The installer never instruments paths outside known Agent Skill roots. Managed b
 ## Known Limitations
 
 - JoyCode Skill telemetry depends on the model following the injected instruction.
-- JoyCode repeated uses of the same Skill in one session are represented as one unique session load.
+- JoyCode repeated uses of the same Skill in one session are requested as repeated `record_skill` calls, but can still be missed if the model or host reuses cached context without executing the accounting instruction.
 - JoyCode remote MCP transports are not counted in the first release unless JoyCode adds a native event surface.
 - A newly created JoyCode Skill can race with the watcher during the current session.
 - Real JoyCode end-to-end validation requires an installed JoyCode environment.

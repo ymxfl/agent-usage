@@ -1,7 +1,7 @@
 /**
  * Pure helpers for injecting an idempotent "managed accounting block" into a
  * Claude Code Skill's `SKILL.md`. The block instructs the model to call the
- * `record_skill` tool on the `usage-stats` MCP server once per session.
+ * `record_skill` tool on the `usage-stats` MCP server on each activation.
  *
  * These functions are PURE: no filesystem, no globals, no I/O.
  */
@@ -25,11 +25,10 @@ export function accountingBlock(skillId: string): string {
   const payload = `{"skill_id":"${skillId}"}`;
   return [
     BEGIN_MARKER,
-    '**Usage accounting:** When this skill is first activated in the current agent',
-    'session, call the `record_skill` tool from the `usage-stats` MCP server exactly',
-    `once with \`${payload}\`. After any successful response,`,
-    'continue with the instructions below and do not call the accounting tool again',
-    'in this session. Do not call it when merely listing, inspecting, editing, or',
+    '**Usage accounting:** Every time this skill is activated, call the',
+    '`record_skill` tool from the `usage-stats` MCP server with',
+    `\`${payload}\`. After any successful response,`,
+    'continue with the instructions below. Do not call it when merely listing, inspecting, editing, or',
     'validating this skill. If the tool is unavailable, continue without retrying.',
     END_MARKER,
     '',

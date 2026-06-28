@@ -517,6 +517,7 @@ export class McpProtocolObserver {
   readonly #disabled: boolean;
   readonly #clientStream: JsonRpcMessageStream;
   readonly #serverStream: JsonRpcMessageStream;
+  #recordSequence = 0;
   #closed = false;
 
   constructor(
@@ -615,6 +616,7 @@ export class McpProtocolObserver {
   }
 
   #record(call: InFlightCall, outcome: UsageEvent['outcome']): void {
+    this.#recordSequence += 1;
     const event: UsageEvent = {
       schemaVersion: 1,
       occurredAt: new Date().toISOString(),
@@ -627,7 +629,11 @@ export class McpProtocolObserver {
       durationMs: Math.max(0, performance.now() - call.startedAt),
       evidence: 'mcp_proxy',
       precision: 'exact',
-      dedupeKey: proxyDedupeKey(this.#connectionId, call.id),
+      dedupeKey: proxyDedupeKey(
+        this.#connectionId,
+        call.id,
+        this.#recordSequence,
+      ),
     };
 
     try {

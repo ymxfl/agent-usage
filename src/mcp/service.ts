@@ -41,6 +41,7 @@ export class UsageMcpService {
   readonly #agent: string;
   readonly #connectionId: string;
   readonly #logger: UsageMcpLogger;
+  #recordSequence = 0;
 
   constructor(
     repository: UsageMcpRepository,
@@ -55,6 +56,7 @@ export class UsageMcpService {
   }
 
   recordSkill(input: RecordSkillInput): RecordSkillResult {
+    this.#recordSequence += 1;
     const event: UsageEvent = {
       schemaVersion: 1,
       occurredAt: new Date().toISOString(),
@@ -66,7 +68,11 @@ export class UsageMcpService {
       outcome: 'unknown',
       evidence: 'injected_mcp',
       precision: 'best_effort',
-      dedupeKey: injectedDedupeKey(this.#connectionId, input.skill_id),
+      dedupeKey: injectedDedupeKey(
+        this.#connectionId,
+        input.skill_id,
+        this.#recordSequence,
+      ),
     };
 
     try {

@@ -30,6 +30,14 @@ describe('accountingBlock', () => {
     expect(block).toContain('`usage-stats`');
   });
 
+  it('asks the agent to record every activation without a session limit', () => {
+    const block = accountingBlock('codex:project:deadbeef');
+
+    expect(block).toContain('Every time this skill is activated');
+    expect(block).not.toContain('exactly once');
+    expect(block).not.toContain('again in this session');
+  });
+
   it('includes the v1 version marker exactly once', () => {
     const block = accountingBlock('a:b:c');
     expect(block.match(/agent-usage:begin v1/g)).toHaveLength(1);

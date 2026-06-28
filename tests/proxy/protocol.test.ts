@@ -46,7 +46,7 @@ describe('McpProtocolObserver', () => {
       outcome: 'success',
       evidence: 'mcp_proxy',
       precision: 'exact',
-      dedupeKey: 'proxy:connection-1:"request-1"',
+      dedupeKey: 'proxy:connection-1:"request-1":1',
     });
     expect(events[0]?.durationMs).toBeCloseTo(12.6);
     expect(events[0]?.occurredAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -226,8 +226,22 @@ describe('McpProtocolObserver', () => {
     observer.observeServerLine('{"jsonrpc":"2.0","id":1,"result":{}}');
 
     expect(events.map(({ name, dedupeKey }) => ({ name, dedupeKey }))).toEqual([
-      { name: 'string', dedupeKey: 'proxy:connection-1:"1"' },
-      { name: 'numeric', dedupeKey: 'proxy:connection-1:1' },
+      { name: 'string', dedupeKey: 'proxy:connection-1:"1":1' },
+      { name: 'numeric', dedupeKey: 'proxy:connection-1:1:2' },
+    ]);
+  });
+
+  it('records repeated request IDs as distinct calls on the same connection', () => {
+    const { observer, events } = fixture();
+
+    observer.observeClientLine('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"first"}}');
+    observer.observeServerLine('{"jsonrpc":"2.0","id":1,"result":{}}');
+    observer.observeClientLine('{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"second"}}');
+    observer.observeServerLine('{"jsonrpc":"2.0","id":1,"result":{}}');
+
+    expect(events.map(({ name, dedupeKey }) => ({ name, dedupeKey }))).toEqual([
+      { name: 'first', dedupeKey: 'proxy:connection-1:1:1' },
+      { name: 'second', dedupeKey: 'proxy:connection-1:1:2' },
     ]);
   });
 
