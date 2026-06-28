@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 
 import type { AdapterRegistry } from '../adapters/registry.js';
-import type { Scope } from '../adapters/types.js';
+import type { DiscoveredTargets, Scope } from '../adapters/types.js';
 import type { UsageEvent } from '../core/event.js';
 import {
   emptySelectionConfig,
@@ -81,6 +81,25 @@ function localWebhookUrl(baseUrl: string): string {
   return `${baseUrl}/webhook/usage`;
 }
 
+function enabledFirst(enabled: boolean | undefined): number {
+  return enabled ? 0 : 1;
+}
+
+function prioritizeEnabledTargets(targets: DiscoveredTargets): DiscoveredTargets {
+  return {
+    ...targets,
+    skills: [...targets.skills].sort(
+      (left, right) =>
+        enabledFirst(left.selectedMode !== undefined) -
+        enabledFirst(right.selectedMode !== undefined),
+    ),
+    mcp: [...targets.mcp].sort(
+      (left, right) =>
+        enabledFirst(left.selected) - enabledFirst(right.selected),
+    ),
+  };
+}
+
 function html(baseUrl: string): string {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -112,6 +131,10 @@ function html(baseUrl: string): string {
     button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     button.danger { color: var(--danger); border-color: #e0aaa5; background: #fff; }
     input, select { min-height: 32px; padding: 6px 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: #fff; color: var(--text); }
+    select.mode-select { min-width: 96px; font-weight: 650; transition: background-color .12s ease, border-color .12s ease, color .12s ease; }
+    select.mode-none { color: #5d6a72; border-color: #cfd7dc; background: #f7f9fa; }
+    select.mode-native-hook { color: #0c5e77; border-color: #8fc8d8; background: #e8f6fa; }
+    select.mode-injected-mcp { color: #17613b; border-color: #9fd2b3; background: #edf8f1; }
     input { min-width: min(560px, 100%); }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #e7ecef; padding: 8px 7px; vertical-align: top; }
@@ -342,6 +365,15 @@ function html(baseUrl: string): string {
       if (mode === 'injected_mcp') return '注入计数';
       return '不统计';
     }
+    function modeClass(mode) {
+      if (mode === 'native_hook') return 'mode-native-hook';
+      if (mode === 'injected_mcp') return 'mode-injected-mcp';
+      return 'mode-none';
+    }
+    function applyModeSelectColor(select) {
+      select.classList.remove('mode-none', 'mode-native-hook', 'mode-injected-mcp');
+      select.classList.add(modeClass(select.value));
+    }
     function capabilityTags(capabilities) {
       const items = [
         ['技能原生事件', capabilities.nativeSkillEvents],
@@ -400,7 +432,8 @@ function html(baseUrl: string): string {
             const selected = (mode === 'none' && !s.selectedMode) || mode === s.selectedMode ? ' selected' : '';
             return '<option value="' + mode + '"' + selected + '>' + modeLabel(mode) + '</option>';
           }).join('');
-          return '<tr><td>' + escapeHtml(s.name) + '</td><td>' + escapeHtml(s.scope) + '</td><td><select data-agent="' + escapeHtml(agent.id) + '" data-skill="' + escapeHtml(s.name) + '">' + options + '</select></td></tr>';
+          const selectedMode = s.selectedMode || 'none';
+          return '<tr><td>' + escapeHtml(s.name) + '</td><td>' + escapeHtml(s.scope) + '</td><td><select class="mode-select ' + modeClass(selectedMode) + '" data-mode-select="true" data-agent="' + escapeHtml(agent.id) + '" data-skill="' + escapeHtml(s.name) + '">' + options + '</select></td></tr>';
         }).join('');
         const mcp = agent.targets.mcp.map((m) => {
           return '<tr><td>' + escapeHtml(m.server) + '</td><td>' + escapeHtml(m.scope) + '</td><td>' + escapeHtml(m.transport) + '</td><td><input type="checkbox" data-agent="' + escapeHtml(agent.id) + '" data-mcp="' + escapeHtml(m.server) + '"' + (m.selected ? ' checked' : '') + '></td></tr>';
@@ -424,6 +457,9 @@ function html(baseUrl: string): string {
           document.querySelectorAll('[data-tab-target^="' + agent + ':"]').forEach((item) => item.classList.toggle('active', item === button));
           document.querySelectorAll('[data-tab^="' + agent + ':"]').forEach((item) => item.classList.toggle('active', item.dataset.tab === button.dataset.tabTarget));
         };
+      });
+      document.querySelectorAll('[data-mode-select]').forEach((select) => {
+        select.onchange = () => applyModeSelectColor(select);
       });
       document.querySelectorAll('[data-op]').forEach((button) => {
         button.onclick = async () => {
@@ -568,12 +604,15 @@ export async function startAgentUsageWebServer(
       if (method(request) === 'GET' && requestUrl.pathname === '/api/state') {
         const config = await loadConfig().catch(() => emptySelectionConfig());
         const agents = await Promise.all(
-          options.registry.list().map(async (adapter) => ({
-            id: adapter.id,
-            capabilities: adapter.capabilities,
-            targets: await adapter.listTargets(),
-            health: await adapter.health(),
-          })),
+          options.registry.list().map(async (adapter) => {
+            const targets = await adapter.listTargets();
+            return {
+              id: adapter.id,
+              capabilities: adapter.capabilities,
+              targets: prioritizeEnabledTargets(targets),
+              health: await adapter.health(),
+            };
+          }),
         );
         sendJson(response, 200, {
           config,

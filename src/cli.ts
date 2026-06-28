@@ -28,10 +28,15 @@ import type {
 } from './adapters/types.js';
 import { defaultClaudeAdapter } from './adapters/claude/adapter.js';
 import { defaultJoyCodeAdapter } from './adapters/joycode/adapter.js';
+import { defaultCodexAdapter } from './adapters/codex/adapter.js';
 import {
   consumeClaudeHook,
   type ClaudeNormalizerDependencies,
 } from './adapters/claude/hook-command.js';
+import {
+  consumeCodexHook,
+  type CodexNormalizerDependencies,
+} from './adapters/codex/hook-command.js';
 import { openUsageDatabase } from './core/database.js';
 import type { UsageEvent } from './core/event.js';
 import { usagePaths, type UsagePaths } from './core/paths.js';
@@ -1469,9 +1474,17 @@ export function createProgram(
     );
 
   program
-    .command('hook claude', { hidden: true })
-    .action(async () => {
-      await runClaudeHookCommand(runtime);
+    .command('hook <agent>', { hidden: true })
+    .action(async (agent: string) => {
+      if (agent === 'claude') {
+        await runClaudeHookCommand(runtime);
+        return;
+      }
+      if (agent === 'codex') {
+        await runCodexHookCommand(runtime);
+        return;
+      }
+      throw new Error(`Unknown hook agent "${agent}"`);
     });
 
   return program;
@@ -1524,6 +1537,52 @@ async function runClaudeHookCommand(runtime: CliRuntime): Promise<void> {
   }
 }
 
+async function runCodexHookCommand(runtime: CliRuntime): Promise<void> {
+  const paths = runtime.paths();
+  const text = await runtime.readStdin();
+
+  let database: CliDatabase | undefined;
+  let repository: CliRepository | undefined;
+  let selectionConfig: SelectionConfig | undefined;
+  const normalizerDependencies: CodexNormalizerDependencies = {
+    now: () => new Date(),
+  };
+
+  const logError = (message: string, error: unknown): Promise<void> =>
+    runtime.appendError(paths.errors, errorMessage(message, error));
+
+  try {
+    await consumeCodexHook(text, {
+      loadSelectionConfig: async () => {
+        selectionConfig = await runtime.loadSelectionConfig(paths.config);
+        return selectionConfig;
+      },
+      insert: (event) => {
+        if (database === undefined) {
+          database = runtime.openDatabase(paths.database);
+          repository = runtime.createRepository(database, selectionConfig);
+        }
+        return repository!.insert(event);
+      },
+      logError,
+      normalizerDependencies,
+    });
+  } finally {
+    try {
+      database?.close();
+    } catch (error) {
+      try {
+        await runtime.appendError(
+          paths.errors,
+          errorMessage('Failed to close Codex hook database', error),
+        );
+      } catch {
+        // Best-effort cleanup logging; never let it escape the hook.
+      }
+    }
+  }
+}
+
 function errorMessage(message: string, error: unknown): string {
   return `${message}: ${error instanceof Error ? error.message : String(error)}`;
 }
@@ -1542,6 +1601,8 @@ async function defaultRegistry(): Promise<AdapterRegistry> {
   if (claude !== undefined) registry.register(claude);
   const joycode = await defaultJoyCodeAdapter();
   if (joycode !== undefined) registry.register(joycode);
+  const codex = await defaultCodexAdapter();
+  if (codex !== undefined) registry.register(codex);
   return registry;
 }
 

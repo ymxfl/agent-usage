@@ -9,7 +9,7 @@ const sharedUsageEventShape = {
   name: z.string().min(1),
   outcome: z.enum(['success', 'failure', 'unknown']),
   durationMs: z.number().nonnegative().optional(),
-  evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy']),
+  evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy', 'session_log']),
   precision: z.enum(['exact', 'best_effort']),
   dedupeKey: z.string().min(1),
 };

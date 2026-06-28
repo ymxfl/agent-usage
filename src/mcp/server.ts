@@ -44,7 +44,7 @@ const usageReportOutputSchema = z
         .object({
           agent: z.string(),
           kind: eventKindSchema,
-          evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy']),
+          evidence: z.enum(['native_hook', 'injected_mcp', 'mcp_proxy', 'session_log']),
           precision: z.enum(['exact', 'best_effort']),
           count: z.number(),
         })

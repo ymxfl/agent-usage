@@ -6,6 +6,14 @@ import type { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { AdapterRegistry } from '../../src/adapters/registry.js';
+import type {
+  AgentAdapter,
+  Capabilities,
+  CoverageReport,
+  DiscoveredTargets,
+  OperationResult,
+  Scope,
+} from '../../src/adapters/types.js';
 import { openUsageDatabase } from '../../src/core/database.js';
 import { usagePaths } from '../../src/core/paths.js';
 import {
@@ -18,6 +26,14 @@ import { startAgentUsageWebServer } from '../../src/web/server.js';
 import { usageEvent } from '../helpers/usage-fixtures.js';
 
 const temporaryDirectories: string[] = [];
+
+const capabilities: Capabilities = {
+  nativeSkillEvents: true,
+  skillInjection: true,
+  nativeMcpEvents: true,
+  stdioMcpProxy: true,
+  skillWatching: false,
+};
 
 async function temporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'agent-usage-web-'));
@@ -59,6 +75,31 @@ function runtimeFixture(root: string): CliRuntime {
     logger: console,
     readStdin: async () => '',
     appendError: async () => {},
+  };
+}
+
+function ok(message = 'ok'): OperationResult[] {
+  return [{ status: 'success', message }];
+}
+
+function adapterWithTargets(targets: DiscoveredTargets): AgentAdapter {
+  const health: CoverageReport = {
+    agent: targets.agent,
+    skills: 'ok',
+    mcp: 'ok',
+    issues: [],
+  };
+  return {
+    id: targets.agent,
+    capabilities,
+    discover: async () => [],
+    listTargets: async () => targets,
+    configure: async () => ok(),
+    install: async (_scope: Scope) => ok(),
+    sync: async (_scope: Scope) => ok(),
+    repair: async (_scope: Scope) => ok(),
+    uninstall: async (_scope: Scope) => ok(),
+    health: async () => health,
   };
 }
 
@@ -125,6 +166,71 @@ describe('agent usage web server', () => {
     }
   });
 
+  it('returns enabled Skills and MCP servers before disabled targets', async () => {
+    const root = await temporaryDirectory();
+    const registry = new AdapterRegistry();
+    registry.register(
+      adapterWithTargets({
+        agent: 'codex',
+        skills: [
+          {
+            name: 'disabled-skill',
+            scope: 'user',
+            path: '/tmp/disabled/SKILL.md',
+            supportedModes: ['injected_mcp'],
+          },
+          {
+            name: 'enabled-skill',
+            scope: 'user',
+            path: '/tmp/enabled/SKILL.md',
+            supportedModes: ['injected_mcp'],
+            selectedMode: 'injected_mcp',
+          },
+        ],
+        mcp: [
+          {
+            server: 'disabled-mcp',
+            scope: 'user',
+            transport: 'stdio',
+            selected: false,
+          },
+          {
+            server: 'enabled-mcp',
+            scope: 'user',
+            transport: 'stdio',
+            selected: true,
+          },
+        ],
+        unresolved: [],
+        issues: [],
+      }),
+    );
+    const server = await startAgentUsageWebServer({
+      registry,
+      runtime: runtimeFixture(root),
+      host: '127.0.0.1',
+      port: 0,
+    });
+
+    try {
+      const response = await fetch(`${server.url}/api/state`);
+      const body = await response.json() as {
+        agents: Array<{ targets: DiscoveredTargets }>;
+      };
+
+      expect(body.agents[0]!.targets.skills.map((skill) => skill.name)).toEqual([
+        'enabled-skill',
+        'disabled-skill',
+      ]);
+      expect(body.agents[0]!.targets.mcp.map((server) => server.server)).toEqual([
+        'enabled-mcp',
+        'disabled-mcp',
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
   it('serves a Chinese console with navigation, confirmations, operation results, and table reports', async () => {
     const root = await temporaryDirectory();
     const server = await startAgentUsageWebServer({
@@ -151,6 +257,9 @@ describe('agent usage web server', () => {
       expect(html).toContain('id="report-warnings"');
       expect(html).toContain("'智能体','类型'");
       expect(html).toContain("'工具','尝试'");
+      expect(html).toContain('select.mode-select');
+      expect(html).toContain('mode-native-hook');
+      expect(html).toContain('mode-injected-mcp');
       expect(html).toContain('本地 webhook');
       expect(html).not.toContain('>Agents<');
       expect(html).not.toContain('>Report<');

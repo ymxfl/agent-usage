@@ -91,7 +91,7 @@ describe('parseUsageEvent', () => {
   it.each([
     ['kind', 'skill_started'],
     ['outcome', 'partial'],
-    ['evidence', 'log_scan'],
+    ['evidence', 'event_log'],
     ['precision', 'estimated'],
   ] as const)('rejects values outside the %s enum', (field, value) => {
     expect(() => parseUsageEvent({ ...baseEvent, [field]: value })).toThrow();
